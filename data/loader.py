@@ -16,7 +16,6 @@ def get_loader(dataset, sampler_type, uniform_over_groups=False,
             contain examples all having the same angle
 
     """
-
     if sampler_type == 'group': # Sample support batches from multiple sub distributions
         batch_sampler = GroupSampler(dataset, meta_batch_size, support_size,
                                           uniform_over_groups=uniform_over_groups)
@@ -104,6 +103,7 @@ def get_loaders(args, only_train=False):
     print("dataset: ", train_dataset)
 
     if train_dataset is not None:
+        print("args.sampler:", args.sampler)
         train_loader = get_loader(train_dataset, sampler_type=args.sampler, uniform_over_groups=args.uniform_over_groups,
                                   meta_batch_size=args.meta_batch_size,
                                   support_size=args.support_size,

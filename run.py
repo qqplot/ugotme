@@ -50,15 +50,16 @@ def get_parser():
     parser.add_argument('--dataset', type=str, default='mnist', choices=['mnist', 'femnist', 'cifar-c', 'tinyimg'])
     parser.add_argument('--data_dir', type=str, default='../data/')
 
-
     # Data sampling
-    parser.add_argument('--sampler', type=str, default='standard',
-            choices=['standard', 'group'],
+    parser.add_argument('--sampler', type=str, default='group', choices=['standard', 'group'],
                         help='Standard or group sampler')
-    parser.add_argument('--uniform_over_groups', type=int, default=0,
+    parser.add_argument('--uniform_over_groups', type=int, default=1,
                         help='Sample across groups uniformly')
-    parser.add_argument('--meta_batch_size', type=int, default=2, help='Number of classes')
-    parser.add_argument('--support_size', type=int, default=50, help='Support size: same as what we call batch size in the appendix')
+    parser.add_argument('--meta_batch_size', type=int, default=6, 
+                        help='Number of classes')
+    parser.add_argument('--support_size', type=int, default=50, 
+                        help='Support size: same as what we call batch size in the appendix')
+
     parser.add_argument('--shuffle_train', type=int, default=1,
                         help='Only relevant when no group sampling = 0 \
                         and --uniform_over_groups 0')
@@ -71,30 +72,28 @@ def get_parser():
                         Best practice is to use this')
 
     # Model args
-    parser.add_argument('--model', type=str, default='convnet',
-                        choices=['resnet50', 'convnet'])
-    parser.add_argument('--pretrained', type=int, default=1,
-                                       help='Pretrained resnet')
+    parser.add_argument('--model', type=str, default='convnet', choices=['resnet50', 'convnet'])
+    parser.add_argument('--pretrained', type=int, default=1, help='Pretrained resnet')
 
     # Method
-    parser.add_argument('--algorithm', type=str, default='ERM', choices=['ERM', 'DRNN', 'ARM-CML', 'ARM-BN', 'ARM-LL', 'DANN', 'MMD'])
+    parser.add_argument('--algorithm', type=str, default='MY-ARM-CML', choices=['ERM', 'DRNN', 'ARM-CML', 'ARM-BN', 'ARM-LL', 'DANN', 'MMD', 'MY-ARM-CML'])
 
     # ARM-CML
-    parser.add_argument('--n_context_channels', type=int, default=3, help='Used when using a convnet/resnet')
+    parser.add_argument('--n_context_channels', type=int, default=12, help='Used when using a convnet/resnet')
     parser.add_argument('--context_net', type=str, default='convnet')
     parser.add_argument('--pret_add_channels', type=int, default=1)
     parser.add_argument('--adapt_bn', type=int, default=0)
 
 
     # Evalaution
-    parser.add_argument('--n_samples_per_group', type=int, default=None,
+    parser.add_argument('--n_samples_per_group', type=int, default=300,
                         help='Number of examples to evaluate on per test distribution')
     parser.add_argument('--test_n_samples_per_group', type=int, default=None,
                         help='Number of examples to evaluate on per test distribution')
-    parser.add_argument('--epochs_per_eval', type=int, default=1)
+    parser.add_argument('--epochs_per_eval', type=int, default=10)
 
     # Test
-    parser.add_argument('--eval_on', type=str, nargs="*", default=['test'])
+    parser.add_argument('--eval_on', type=str, nargs="*", default=['val', 'test'])
 
     # DANN
     parser.add_argument('--lambd', type=float, default=0.01)
@@ -103,7 +102,7 @@ def get_parser():
     # Logging
     parser.add_argument('--seeds', type=int, nargs="*", default=[0], help='Seeds')
     parser.add_argument('--plot', type=int, default=0, help='Plot or not')
-    parser.add_argument('--exp_name', type=str, default='')
+    parser.add_argument('--exp_name', type=str, default='arm_cml')
     parser.add_argument('--debug', type=int, default=0)
     parser.add_argument('--log_wandb', type=int, default=0)
 
@@ -193,7 +192,7 @@ if __name__ == '__main__':
 
             # Save folder
             datetime_now = datetime.now().strftime("%Y%m%d-%H%M%S")
-            name = args.dataset + args.exp_name + '_' + str(seed)
+            name = args.dataset + '_' + args.exp_name + '_' + str(seed)
             args.ckpt_dir = Path('output') / 'checkpoints' / f'{name}_{datetime_now}'
             ckpt_dirs.append(args.ckpt_dir)
             print("CKPT DIR: ", args.ckpt_dir)

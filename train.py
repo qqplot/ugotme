@@ -27,14 +27,11 @@ def run_epoch(algorithm, loader, train, progress_bar=True):
     if progress_bar:
         loader = tqdm(loader, desc=f'{"train" if train else "eval"} loop')
 
-
     for images, labels, group_ids in loader:
 
         # Put on GPU
         images = images.to(algorithm.device)
         labels = labels.to(algorithm.device)
-
-
 
         # Forward
         if train:

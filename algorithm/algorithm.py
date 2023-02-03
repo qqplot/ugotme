@@ -28,7 +28,7 @@ def init_algorithm(args, train_dataset):
         n_img_channels = 3
 
     # Channels of main model
-    if args.algorithm == 'ARM-CML':
+    if args.algorithm == 'ARM-CML' or args.algorithm == 'MY-ARM-CML':
         n_channels = n_img_channels + args.n_context_channels
         hidden_dim = 64
         context_net = models.ContextNet(n_img_channels, args.n_context_channels,
@@ -82,7 +82,15 @@ def init_algorithm(args, train_dataset):
         hparams['support_size'] = args.support_size
         hparams['n_context_channels'] = args.n_context_channels
         hparams['adapt_bn'] = args.adapt_bn
+        print("ARM_CML..")
         algorithm = ARM_CML(model, loss_fn, args.device, context_net, hparams)
+
+    elif args.algorithm == 'MY-ARM-CML':
+        hparams['support_size'] = args.support_size
+        hparams['n_context_channels'] = args.n_context_channels
+        hparams['adapt_bn'] = args.adapt_bn
+        print("MY_ARM_CML..")
+        algorithm = MY_ARM_CML(model, loss_fn, args.device, context_net, hparams)
 
     elif args.algorithm == 'ARM-LL':
         learned_loss_net = models.MLP(in_size=num_classes, norm_reduce=True).to(args.device)
@@ -97,7 +105,7 @@ def init_algorithm(args, train_dataset):
 
 class AverageMeter:
 
-    def __init__(name):
+    def __init__(self, name):
         self.value = 0
         self.total_count = 0
 
@@ -159,8 +167,6 @@ class ERM(nn.Module):
         # Forward
         logits = self.predict(images)
         loss = self.loss_fn(logits, labels)
-
-
         self.update(loss)
 
         stats = {
@@ -269,6 +275,7 @@ class ARM_CML(ERM):
 
     def predict(self, x):
         batch_size, c, h, w = x.shape
+        # print("x.shape: batch_size, c, h, w", x.shape)
 
         if batch_size % self.support_size == 0:
             meta_batch_size, support_size = batch_size // self.support_size, self.support_size
@@ -286,11 +293,66 @@ class ARM_CML(ERM):
             return torch.cat(out)
         else:
             context = self.context_net(x) # Shape: batch_size, channels, H, W
+            # print("context.size:", context.size())
             context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
             context = context.mean(dim=1) # Shape: meta_batch_size, self.n_context_channels
             context = torch.repeat_interleave(context, repeats=support_size, dim=0) # meta_batch_size * support_size, context_size
             x = torch.cat([x, context], dim=1)
             return self.model(x)
+
+class MY_ARM_CML(ERM):
+
+    def __init__(self, model, loss_fn, device, context_net, hparams={}):
+        super().__init__(model, loss_fn, device, hparams)
+
+        self.context_net = context_net
+        self.support_size = hparams['support_size']
+        self.n_context_channels = hparams['n_context_channels']
+        self.adapt_bn = hparams['adapt_bn']
+
+        params = list(self.model.parameters()) + list(self.context_net.parameters())
+        self.init_optimizers(params)
+
+
+    def predict(self, x):
+        batch_size, c, h, w = x.shape
+        # print("x.shape: batch_size, c, h, w", x.shape)
+
+        if batch_size % self.support_size == 0:
+            meta_batch_size, support_size = batch_size // self.support_size, self.support_size
+        else:
+            meta_batch_size, support_size = 1, batch_size
+
+        if self.adapt_bn:
+            out = []
+            for i in range(meta_batch_size):
+                x_i = x[i*support_size:(i+1)*support_size]
+                context_i = self.context_net(x_i)
+                context_i = context_i.mean(dim=0).expand(support_size, -1, -1, -1)
+                x_i = torch.cat([x_i, context_i], dim=1)
+                out.append(self.model(x_i))
+            return torch.cat(out)
+        else:
+
+            context = self.context_net(x) # Shape: batch_size, channels, H, W
+
+            ## Experiment 1: All cumsum
+            # context = torch.cumsum(context, dim=0) # batch_size, context_size
+
+            ## Experiment 2: Meta batch cumsum
+            context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
+            # print("context.size:", context.size())
+            context = context.cumsum(dim=1) # Shape: meta_batch_size, self.n_context_channels
+            context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size          
+
+            # context_avg = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
+            # context_avg = context_avg.mean(dim=1) # Shape: meta_batch_size, self.n_context_channels
+            # context_avg = torch.repeat_interleave(context_avg, repeats=support_size, dim=0) # meta_batch_size * support_size, context_size          
+
+            x = torch.cat([x, context], dim=1)
+            return self.model(x)
+
+
 
 class ARM_LL(ERM):
 
