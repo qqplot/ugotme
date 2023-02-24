@@ -6,3 +6,11 @@ __pycache__/
 
 output/
 train.out
+
+*.ipynb
+**/*.ipynb
+
+.ipynb_checkpoints/
+**/.ipynb_checkpoints
+
+*.json

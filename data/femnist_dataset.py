@@ -18,7 +18,6 @@ def read_dir(data_dir):
     clients = []
     groups = []
     data = defaultdict(lambda : None)
-
     files = os.listdir(data_dir)
     files = [f for f in files if f.endswith('.json')]
     for f in files:
@@ -78,12 +77,8 @@ class FEMNISTDataset(Dataset):
                                             bins=range(self.n_groups + 1),
                                             density=False)
 
-
-
         print("split: ", split)
-
         print("X sum: ", self._X.sum())
-
         print("n groups: ", len(clients))
         print("n groups: ", self.n_groups)
         print("Dataset size: ", len(self._y))
@@ -96,6 +91,7 @@ class FEMNISTDataset(Dataset):
 
     def __getitem__(self, index):
         x = self.transform(**{'image': self._X[index]})['image']
+        x = x.type(torch.FloatTensor)
         y = torch.tensor(self._y[index], dtype=torch.long)
         g = torch.tensor(self.group_ids[index], dtype=torch.long)
         return x, y, g

@@ -333,21 +333,11 @@ class MY_ARM_CML(ERM):
                 out.append(self.model(x_i))
             return torch.cat(out)
         else:
-
             context = self.context_net(x) # Shape: batch_size, channels, H, W
 
-            ## Experiment 1: All cumsum
-            # context = torch.cumsum(context, dim=0) # batch_size, context_size
-
-            ## Experiment 2: Meta batch cumsum
             context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
-            # print("context.size:", context.size())
             context = context.cumsum(dim=1) # Shape: meta_batch_size, self.n_context_channels
             context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size          
-
-            # context_avg = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
-            # context_avg = context_avg.mean(dim=1) # Shape: meta_batch_size, self.n_context_channels
-            # context_avg = torch.repeat_interleave(context_avg, repeats=support_size, dim=0) # meta_batch_size * support_size, context_size          
 
             x = torch.cat([x, context], dim=1)
             return self.model(x)
