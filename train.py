@@ -17,7 +17,6 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = "TRUE"
 ####################
 ###### TRAIN #######
 ####################
-
 def run_epoch(algorithm, loader, train, progress_bar=True):
 
     epoch_labels = []
@@ -35,7 +34,7 @@ def run_epoch(algorithm, loader, train, progress_bar=True):
 
         # Forward
         if train:
-            logits, batch_stats = algorithm.learn(images, labels, group_ids)
+            logits, batch_stats = algorithm.learn(images, labels, group_ids, train)
             if logits is None: # DANN
                 continue
         else:

@@ -1,7 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=cum6_50
-#SBATCH --nodes=1
+#SBATCH --job-name=unc_6_50
 #SBATCH --gres=gpu:1
 #SBATCH --time=0-12:00:00
 #SBATCH --mem=16000MB
@@ -15,7 +14,7 @@ conda activate maicon
 SEEDS="0"
 SHARED_ARGS="\
     --data_dir ./data/\
-    --dataset femnist \
+    --dataset mnist \
     --num_epochs 200 \
     --sampler group \
     --uniform_over_groups 1 \
@@ -28,7 +27,14 @@ SHARED_ARGS="\
     --weight_decay 0 \
     --log_wandb 0 \
     --train 1 \
+    --dropout_rate 0.3 \
+    --model convnet_unc \
     "
+
+
+# Origin: Train (Batch 6 * 50)
+srun python run.py --algorithm ARM-CML-UNC --meta_batch_size 6 --support_size 50 --exp_name unc_6_50 $SHARED_ARGS
+
 
 # Origin: Train (Batch 6 * 50) -> default
 # srun python run.py --algorithm ARM-CML --meta_batch_size 6 --support_size 50 --exp_name ori6_50 $SHARED_ARGS
@@ -60,7 +66,7 @@ SHARED_ARGS="\
 
 
 # Cumsum-Meta: Train (Batch 6 * 50)
-srun python run.py --algorithm MY-ARM-CML --meta_batch_size 6 --support_size 50 --exp_name cum6_50 $SHARED_ARGS
+# srun python run.py --algorithm MY-ARM-CML --meta_batch_size 6 --support_size 50 --exp_name cum6_50 $SHARED_ARGS
 # python run.py --eval_on test --test 1 --train 0 --ckpt_folders mnist_cum6_50_0_20230203-011443 --meta_batch_size 1 --support_size 50
 
 # Cumsum-Meta: Train (Batch 6 * 5)
@@ -81,4 +87,9 @@ srun python run.py --algorithm MY-ARM-CML --meta_batch_size 6 --support_size 50 
 # Cumsum-Meta: Train (Batch 1 * 50)
 # srun python run.py --algorithm MY-ARM-CML --meta_batch_size 1 --support_size 50 --exp_name cum1_50 $SHARED_ARGS
 # python run.py --eval_on test --test 1 --train 0 --ckpt_folders mnist_cum1_50_0_20230203-012510 --meta_batch_size 1 --support_size 50
+
+# sbatch --dependency=afterok:<jobID> job.sh
+
+# sbatch tmux launch-shell
+
 

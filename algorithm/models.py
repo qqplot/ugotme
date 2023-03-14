@@ -54,6 +54,54 @@ class ContextNet(nn.Module):
         out = self.context_net(x)
         return out
 
+
+class ConvNetUNC(nn.Module):
+    def __init__(self, num_classes=10, num_channels=3, hidden_dim=128, return_features=False, dropout_rate=0.3, **kwargs):
+        super(ConvNetUNC, self).__init__()
+
+        kernel_size = 5
+        self.dropout_rate = dropout_rate
+        print("using smaller model and dropout_rate is", self.dropout_rate)
+
+        self.conv1 = nn.Sequential(
+                        nn.Conv2d(num_channels, hidden_dim, kernel_size),
+                        nn.BatchNorm2d(hidden_dim),
+                        nn.ReLU(),
+                        nn.Dropout(p=self.dropout_rate),
+                        nn.MaxPool2d(2)
+                    )
+        self.conv2 = nn.Sequential(
+                        nn.Conv2d(hidden_dim, hidden_dim, kernel_size),
+                        nn.BatchNorm2d(hidden_dim),
+                        nn.ReLU(),
+                        nn.Dropout(p=self.dropout_rate),
+                        nn.MaxPool2d(2)
+                        )
+
+        self.adaptive_pool = nn.AdaptiveAvgPool2d(1)
+
+        self.final = nn.Sequential(
+                    nn.Linear(hidden_dim, 200),
+                    nn.ReLU(),
+                    nn.Dropout(p=self.dropout_rate),
+                    Identity() if return_features else nn.Linear(200, num_classes)
+                  )
+        self.num_features = 200
+
+
+    def forward(self, x):
+        """Returns logit with shape (batch_size, num_classes)"""
+
+        # x shape: batch_size, num_channels, w, h
+        out = self.conv1(x)
+        out = self.conv2(out)
+        out = self.adaptive_pool(out) # shape: batch_size, hidden_dim, 1, 1
+        out = out.squeeze(dim=-1).squeeze(dim=-1) # make sure not to squeeze the first dimension when batch size is 0.
+        out = self.final(out)
+
+        return out
+
+
 class ConvNet(nn.Module):
     def __init__(self, num_classes=10, num_channels=3, smaller_model=True, hidden_dim=128, return_features=False, **kwargs):
         super(ConvNet, self).__init__()

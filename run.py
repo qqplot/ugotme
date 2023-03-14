@@ -10,6 +10,8 @@ import torch
 import train
 import data
 
+
+
 def test(args, algorithm, seed, eval_on):
 
     # Get data
@@ -72,17 +74,18 @@ def get_parser():
                         Best practice is to use this')
 
     # Model args
-    parser.add_argument('--model', type=str, default='convnet', choices=['resnet50', 'convnet'])
+    parser.add_argument('--model', type=str, default='convnet', choices=['resnet50', 'convnet', 'convnet_unc'])
     parser.add_argument('--pretrained', type=int, default=1, help='Pretrained resnet')
 
     # Method
-    parser.add_argument('--algorithm', type=str, default='MY-ARM-CML', choices=['ERM', 'DRNN', 'ARM-CML', 'ARM-BN', 'ARM-LL', 'DANN', 'MMD', 'MY-ARM-CML'])
+    parser.add_argument('--algorithm', type=str, default='MY-ARM-CML', choices=['ERM', 'DRNN', 'ARM-CML', 'ARM-BN', 'ARM-LL', 'DANN', 'MMD', 'MY-ARM-CML', 'ARM-CML-UNC'])
 
     # ARM-CML
     parser.add_argument('--n_context_channels', type=int, default=12, help='Used when using a convnet/resnet')
     parser.add_argument('--context_net', type=str, default='convnet')
     parser.add_argument('--pret_add_channels', type=int, default=1)
     parser.add_argument('--adapt_bn', type=int, default=0)
+    parser.add_argument('--dropout_rate', type=float, default=0.3)
 
 
     # Evalaution

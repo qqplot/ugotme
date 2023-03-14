@@ -3,10 +3,18 @@ import math
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
+
 import higher
+
 
 from . import models
 
+def enable_dropout(model):
+    model.eval()
+    for m in model.modules():
+        if m.__class__.__name__.startswith('Dropout'):
+            m.train()
 
 def init_algorithm(args, train_dataset):
 
@@ -28,7 +36,7 @@ def init_algorithm(args, train_dataset):
         n_img_channels = 3
 
     # Channels of main model
-    if args.algorithm == 'ARM-CML' or args.algorithm == 'MY-ARM-CML':
+    if args.algorithm in ['ARM-CML', 'MY-ARM-CML', 'ARM-CML-UNC']:
         n_channels = n_img_channels + args.n_context_channels
         hidden_dim = 64
         context_net = models.ContextNet(n_img_channels, args.n_context_channels,
@@ -44,9 +52,12 @@ def init_algorithm(args, train_dataset):
     # Main model
     if args.model == 'convnet':
         model = models.ConvNet(num_channels=n_channels, num_classes=num_classes, smaller_model=(args.algorithm == 'ARM-CML'), return_features=return_features)
-    else:
+    elif args.model == 'resnet50':
         model = models.ResNet(num_channels=n_channels, num_classes=num_classes, model_name=args.model,
                                      pretrained=args.pretrained, return_features=return_features)
+    elif args.model == 'convnet_unc':
+        model = models.ConvNetUNC(num_channels=n_channels, num_classes=num_classes, return_features=return_features, dropout_rate=args.dropout_rate)
+
     model = model.to(args.device)
 
 
@@ -91,6 +102,13 @@ def init_algorithm(args, train_dataset):
         hparams['adapt_bn'] = args.adapt_bn
         print("MY_ARM_CML..")
         algorithm = MY_ARM_CML(model, loss_fn, args.device, context_net, hparams)
+
+    elif args.algorithm == 'ARM-CML-UNC':
+        hparams['support_size'] = args.support_size
+        hparams['n_context_channels'] = args.n_context_channels
+        hparams['adapt_bn'] = args.adapt_bn
+        print("ARM_CML_UNC..")
+        algorithm = ARM_CML_UNC(model, loss_fn, args.device, context_net, hparams)
 
     elif args.algorithm == 'ARM-LL':
         learned_loss_net = models.MLP(in_size=num_classes, norm_reduce=True).to(args.device)
@@ -161,7 +179,7 @@ class ERM(nn.Module):
         return accuracy
 
     def learn(self, images, labels, group_ids=None):
-
+        
         self.train()
 
         # Forward
@@ -342,6 +360,100 @@ class MY_ARM_CML(ERM):
             x = torch.cat([x, context], dim=1)
             return self.model(x)
 
+class ARM_CML_UNC(ERM):
+
+    def __init__(self, model, loss_fn, device, context_net, hparams={}):
+        super().__init__(model, loss_fn, device, hparams)
+
+        self.context_net = context_net
+        self.support_size = hparams['support_size']
+        self.n_context_channels = hparams['n_context_channels']
+        self.adapt_bn = hparams['adapt_bn']
+
+        params = list(self.model.parameters()) + list(self.context_net.parameters())
+        self.init_optimizers(params)
+
+
+    def predict(self, x, train=False):
+        batch_size, c, h, w = x.shape
+        # print("x.shape: batch_size, c, h, w", x.shape)
+
+        if batch_size % self.support_size == 0:
+            meta_batch_size, support_size = batch_size // self.support_size, self.support_size
+        else:
+            meta_batch_size, support_size = 1, batch_size
+        
+        if train:
+            self.context_net.train()
+        else:
+            self.context_net.eval()
+
+        context = self.context_net(x) # Shape: batch_size, channels, H, W
+        x_reshape = x.reshape((meta_batch_size, support_size, c, h, w))
+        x_reshape = x_reshape.permute((1, 0, 2, 3, 4))
+        context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
+        context = context.permute((1, 0, 2, 3, 4))
+        
+        T = 1
+        context_list = []
+        c_prime = torch.zeros_like(context[0]) # Shape: meta_batch_size, n_context_channels, H, W
+        # with torch.no_grad():
+        for idx, (x_, c_) in enumerate(zip(x_reshape, context)):
+            
+            # if idx % support_size == 0:
+            #     c_prime = torch.zeros_like(context[0])
+
+            x_ = torch.cat([x_, c_prime], dim=1) # Shape: meta_batch_size, 2 * n_context_channels, H, W
+
+            out_prob = []    
+            with torch.no_grad():
+                enable_dropout(self.model)
+                for _ in range(T):
+                    outputs = self.model(x_) # Shape : meta_batch_size, num_classes
+                    out_prob.append(F.softmax(outputs, dim=1))
+
+            out_prob = torch.stack(out_prob)
+            out_std = torch.std(out_prob, dim=0)
+            out_prob = torch.mean(out_prob, dim=0)
+            max_value, max_idx = torch.max(out_prob, dim=1)
+            max_std = out_std.gather(1, max_idx.view(-1,1))
+            # print("max_std:", max_std.size()) # meta_batch_size, 1
+            # print("out_std:", out_std.size()) # meta_batch_size, num_classes
+
+            # u = torch.exp(-max_std).unsqueeze(-1).unsqueeze(-1).detach()
+            u = 1.0
+            c_prime = c_prime + u * c_            
+            # print("c_prime", c_prime.size())
+            context_list.append(c_prime)
+
+        context = torch.stack(context_list, dim=0) # support_size, meta_batch_size, context_size
+        context = context.permute((1, 0, 2, 3, 4)) # meta_batch_size, support_size, context_size
+        context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size          
+        # print("context", context.size())        
+
+        x = x_reshape.permute((1, 0, 2, 3, 4))
+        x = x.reshape((meta_batch_size * support_size, c, h, w))
+        x = torch.cat([x, context], dim=1)
+        if train:
+            self.model.train()
+        else:
+            self.model.eval()
+        return self.model(x)
+    
+    def learn(self, images, labels, group_ids=None):
+        
+        self.train()
+
+        # Forward
+        logits = self.predict(images, train=True)
+        loss = self.loss_fn(logits, labels)
+        self.update(loss)
+
+        stats = {
+                 'objective': loss.detach().item(),
+                }
+
+        return logits, stats
 
 
 class ARM_LL(ERM):
