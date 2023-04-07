@@ -56,20 +56,42 @@ class ContextNet(nn.Module):
 
 
 class ConvNetUNC(nn.Module):
-    def __init__(self, num_classes=10, num_channels=3, hidden_dim=128, return_features=False, dropout_rate=0.3, **kwargs):
+    def __init__(self, num_classes=10, num_channels=3, smaller_model=True, hidden_dim=128, return_features=False, dropout_rate=0.3, **kwargs):
         super(ConvNetUNC, self).__init__()
 
         kernel_size = 5
+        self.smaller_model = smaller_model
         self.dropout_rate = dropout_rate
-        print("using smaller model and dropout_rate is", self.dropout_rate)
+        print("dropout_rate is", self.dropout_rate)
+        padding = (kernel_size - 1) // 2
+    
 
-        self.conv1 = nn.Sequential(
-                        nn.Conv2d(num_channels, hidden_dim, kernel_size),
+        if smaller_model:
+            print("using smaller model")
+
+            self.conv1 = nn.Sequential(
+                            nn.Conv2d(num_channels, hidden_dim, kernel_size),
+                            nn.BatchNorm2d(hidden_dim),
+                            nn.ReLU(),
+                            nn.Dropout(p=self.dropout_rate),
+                            nn.MaxPool2d(2)
+                        )
+        else:
+            print("using larger model")
+            self.conv0 = nn.Sequential(
+                        nn.Conv2d(num_channels, hidden_dim, kernel_size, padding=padding),
                         nn.BatchNorm2d(hidden_dim),
                         nn.ReLU(),
-                        nn.Dropout(p=self.dropout_rate),
-                        nn.MaxPool2d(2)
                     )
+            
+            self.conv1 = nn.Sequential(
+                            nn.Conv2d(hidden_dim, hidden_dim, kernel_size),
+                            nn.BatchNorm2d(hidden_dim),
+                            nn.ReLU(),
+                            nn.Dropout(p=self.dropout_rate),
+                            nn.MaxPool2d(2)
+                        )            
+            
         self.conv2 = nn.Sequential(
                         nn.Conv2d(hidden_dim, hidden_dim, kernel_size),
                         nn.BatchNorm2d(hidden_dim),
@@ -93,7 +115,12 @@ class ConvNetUNC(nn.Module):
         """Returns logit with shape (batch_size, num_classes)"""
 
         # x shape: batch_size, num_channels, w, h
-        out = self.conv1(x)
+        if self.smaller_model:
+            out = self.conv1(x)
+        else:
+            out = self.conv0(x)
+            out = self.conv1(out)
+
         out = self.conv2(out)
         out = self.adaptive_pool(out) # shape: batch_size, hidden_dim, 1, 1
         out = out.squeeze(dim=-1).squeeze(dim=-1) # make sure not to squeeze the first dimension when batch size is 0.

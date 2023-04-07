@@ -1,5 +1,4 @@
 import math
-
 import numpy as np
 import torch
 from torch import nn
@@ -8,117 +7,17 @@ import torch.nn.functional as F
 import higher
 
 
-from . import models
+def disable_dropout(model):
+
+    for m in model.modules():
+        if m.__class__.__name__.startswith('Dropout'):
+            m.eval()
 
 def enable_dropout(model):
     model.eval()
     for m in model.modules():
         if m.__class__.__name__.startswith('Dropout'):
             m.train()
-
-def init_algorithm(args, train_dataset):
-
-    if args.dataset in ['mnist']:
-        num_classes = 10
-        num_train_domains = 14
-        n_img_channels = 1
-    elif args.dataset == 'femnist':
-        num_classes = 62
-        num_train_domains = 262
-        n_img_channels = 1
-    elif args.dataset in 'tinyimg':
-        num_classes = 200
-        num_train_domains = 51
-        n_img_channels = 3
-    elif args.dataset in 'cifar-c':
-        num_classes = 10
-        num_train_domains = 56
-        n_img_channels = 3
-
-    # Channels of main model
-    if args.algorithm in ['ARM-CML', 'MY-ARM-CML', 'ARM-CML-UNC']:
-        n_channels = n_img_channels + args.n_context_channels
-        hidden_dim = 64
-        context_net = models.ContextNet(n_img_channels, args.n_context_channels,
-                                 hidden_dim=hidden_dim, kernel_size=5).to(args.device)
-    else:
-        n_channels = n_img_channels
-
-    if args.algorithm in ['DANN', 'MMD']:
-        return_features = True
-    else:
-        return_features = False
-
-    # Main model
-    if args.model == 'convnet':
-        model = models.ConvNet(num_channels=n_channels, num_classes=num_classes, smaller_model=(args.algorithm == 'ARM-CML'), return_features=return_features)
-    elif args.model == 'resnet50':
-        model = models.ResNet(num_channels=n_channels, num_classes=num_classes, model_name=args.model,
-                                     pretrained=args.pretrained, return_features=return_features)
-    elif args.model == 'convnet_unc':
-        model = models.ConvNetUNC(num_channels=n_channels, num_classes=num_classes, return_features=return_features, dropout_rate=args.dropout_rate)
-
-    model = model.to(args.device)
-
-
-    # Loss fn
-    if args.algorithm in ['DRNN']:
-        loss_fn = nn.CrossEntropyLoss(reduction='none')
-    else:
-        loss_fn = nn.CrossEntropyLoss()
-
-    # Algorithm
-    hparams = {'optimizer': args.optimizer,
-               'learning_rate': args.learning_rate,
-               'weight_decay': args.weight_decay}
-
-    if args.algorithm == 'ERM':
-        algorithm = ERM(model, loss_fn, args.device, hparams)
-    elif args.algorithm == 'DRNN':
-        hparams['robust_step_size'] = 0.01
-        algorithm = DRNN(model, loss_fn, args.device, num_train_domains, hparams)
-
-    elif args.algorithm == 'DANN':
-        hparams['d_steps_per_g_step'] = args.d_steps_per_g_step
-        hparams['lambd'] = args.lambd
-        hparams['support_size'] = args.support_size
-        algorithm = DANN(model, loss_fn, args.device, hparams, num_train_domains, num_classes)
-
-    elif args.algorithm == 'MMD':
-        hparams['support_size'] = args.support_size
-        hparams['gamma'] = 1
-        algorithm = MMD(model, loss_fn, args.device, hparams, num_classes)
-
-    elif args.algorithm == 'ARM-CML':
-        hparams['support_size'] = args.support_size
-        hparams['n_context_channels'] = args.n_context_channels
-        hparams['adapt_bn'] = args.adapt_bn
-        print("ARM_CML..")
-        algorithm = ARM_CML(model, loss_fn, args.device, context_net, hparams)
-
-    elif args.algorithm == 'MY-ARM-CML':
-        hparams['support_size'] = args.support_size
-        hparams['n_context_channels'] = args.n_context_channels
-        hparams['adapt_bn'] = args.adapt_bn
-        print("MY_ARM_CML..")
-        algorithm = MY_ARM_CML(model, loss_fn, args.device, context_net, hparams)
-
-    elif args.algorithm == 'ARM-CML-UNC':
-        hparams['support_size'] = args.support_size
-        hparams['n_context_channels'] = args.n_context_channels
-        hparams['adapt_bn'] = args.adapt_bn
-        print("ARM_CML_UNC..")
-        algorithm = ARM_CML_UNC(model, loss_fn, args.device, context_net, hparams)
-
-    elif args.algorithm == 'ARM-LL':
-        learned_loss_net = models.MLP(in_size=num_classes, norm_reduce=True).to(args.device)
-        hparams['support_size'] = args.support_size
-        algorithm = ARM_LL(model, loss_fn, args.device, learned_loss_net, hparams)
-    elif args.algorithm == 'ARM-BN':
-        hparams['support_size'] = args.support_size
-        algorithm = ARM_BN(model, loss_fn, args.device, hparams)
-
-    return algorithm
 
 
 class AverageMeter:
@@ -318,7 +217,7 @@ class ARM_CML(ERM):
             x = torch.cat([x, context], dim=1)
             return self.model(x)
 
-class MY_ARM_CML(ERM):
+class ARM_CUSUM(ERM):
 
     def __init__(self, model, loss_fn, device, context_net, hparams={}):
         super().__init__(model, loss_fn, device, hparams)
@@ -326,7 +225,6 @@ class MY_ARM_CML(ERM):
         self.context_net = context_net
         self.support_size = hparams['support_size']
         self.n_context_channels = hparams['n_context_channels']
-        self.adapt_bn = hparams['adapt_bn']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
         self.init_optimizers(params)
@@ -334,33 +232,22 @@ class MY_ARM_CML(ERM):
 
     def predict(self, x):
         batch_size, c, h, w = x.shape
-        # print("x.shape: batch_size, c, h, w", x.shape)
 
         if batch_size % self.support_size == 0:
             meta_batch_size, support_size = batch_size // self.support_size, self.support_size
         else:
             meta_batch_size, support_size = 1, batch_size
 
-        if self.adapt_bn:
-            out = []
-            for i in range(meta_batch_size):
-                x_i = x[i*support_size:(i+1)*support_size]
-                context_i = self.context_net(x_i)
-                context_i = context_i.mean(dim=0).expand(support_size, -1, -1, -1)
-                x_i = torch.cat([x_i, context_i], dim=1)
-                out.append(self.model(x_i))
-            return torch.cat(out)
-        else:
-            context = self.context_net(x) # Shape: batch_size, channels, H, W
+        context = self.context_net(x) # Shape: batch_size, channels, H, W
 
-            context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
-            context = context.cumsum(dim=1) # Shape: meta_batch_size, self.n_context_channels
-            context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size          
+        context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
+        context = context.cumsum(dim=1) # Shape: meta_batch_size, self.n_context_channels
+        context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size          
 
-            x = torch.cat([x, context], dim=1)
-            return self.model(x)
+        x = torch.cat([x, context], dim=1)
+        return self.model(x)
 
-class ARM_CML_UNC(ERM):
+class ARM_UNC(ERM):
 
     def __init__(self, model, loss_fn, device, context_net, hparams={}):
         super().__init__(model, loss_fn, device, hparams)
@@ -368,7 +255,8 @@ class ARM_CML_UNC(ERM):
         self.context_net = context_net
         self.support_size = hparams['support_size']
         self.n_context_channels = hparams['n_context_channels']
-        self.adapt_bn = hparams['adapt_bn']
+        self.beta = hparams['beta']
+        self.T = hparams['T']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
         self.init_optimizers(params)
@@ -376,7 +264,6 @@ class ARM_CML_UNC(ERM):
 
     def predict(self, x, train=False):
         batch_size, c, h, w = x.shape
-        # print("x.shape: batch_size, c, h, w", x.shape)
 
         if batch_size % self.support_size == 0:
             meta_batch_size, support_size = batch_size // self.support_size, self.support_size
@@ -387,6 +274,8 @@ class ARM_CML_UNC(ERM):
             self.context_net.train()
         else:
             self.context_net.eval()
+            self.model.eval()
+            enable_dropout(self.model)
 
         context = self.context_net(x) # Shape: batch_size, channels, H, W
         x_reshape = x.reshape((meta_batch_size, support_size, c, h, w))
@@ -394,43 +283,40 @@ class ARM_CML_UNC(ERM):
         context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
         context = context.permute((1, 0, 2, 3, 4))
         
-        T = 1
+        T = self.T
         context_list = []
+        # ulist = []
         c_prime = torch.zeros_like(context[0]) # Shape: meta_batch_size, n_context_channels, H, W
-        # with torch.no_grad():
+        # ulist = []
         for idx, (x_, c_) in enumerate(zip(x_reshape, context)):
             
-            # if idx % support_size == 0:
-            #     c_prime = torch.zeros_like(context[0])
-
             x_ = torch.cat([x_, c_prime], dim=1) # Shape: meta_batch_size, 2 * n_context_channels, H, W
-
             out_prob = []    
-            with torch.no_grad():
-                enable_dropout(self.model)
+            with torch.no_grad():              
                 for _ in range(T):
                     outputs = self.model(x_) # Shape : meta_batch_size, num_classes
-                    out_prob.append(F.softmax(outputs, dim=1))
-
+                    out_prob.append(F.softmax(outputs, dim=-1))
             out_prob = torch.stack(out_prob)
             out_std = torch.std(out_prob, dim=0)
             out_prob = torch.mean(out_prob, dim=0)
             max_value, max_idx = torch.max(out_prob, dim=1)
             max_std = out_std.gather(1, max_idx.view(-1,1))
-            # print("max_std:", max_std.size()) # meta_batch_size, 1
-            # print("out_std:", out_std.size()) # meta_batch_size, num_classes
 
-            # u = torch.exp(-max_std).unsqueeze(-1).unsqueeze(-1).detach()
-            u = 1.0
+            u = torch.exp(-self.beta * max_std).unsqueeze(-1).unsqueeze(-1).detach()
+            # ulist.append(max_std.item()) # 0(100%) ~ 0.3(55%)
+            # u = 1.0
+            # u = torch.ones_like(max_std)
+            # u = torch.exp(-u).unsqueeze(-1).unsqueeze(-1).detach()
+            
             c_prime = c_prime + u * c_            
             # print("c_prime", c_prime.size())
             context_list.append(c_prime)
-
+        # print("ulist:", min(ulist, max(ulist)))
         context = torch.stack(context_list, dim=0) # support_size, meta_batch_size, context_size
         context = context.permute((1, 0, 2, 3, 4)) # meta_batch_size, support_size, context_size
         context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size          
         # print("context", context.size())        
-
+        
         x = x_reshape.permute((1, 0, 2, 3, 4))
         x = x.reshape((meta_batch_size * support_size, c, h, w))
         x = torch.cat([x, context], dim=1)
@@ -438,6 +324,15 @@ class ARM_CML_UNC(ERM):
             self.model.train()
         else:
             self.model.eval()
+            enable_dropout(self.model)
+            outputs = []
+            for _ in range(T):
+                outputs.append(self.model(x))
+            probs = F.softmax(torch.stack(outputs, dim=0), dim=-1).mean(dim=0)
+            return probs
+
+        
+        # disable_dropout(self.model)            
         return self.model(x)
     
     def learn(self, images, labels, group_ids=None):
@@ -662,11 +557,8 @@ class DANN(ERM):
                                                 weight_decay=self.weight_decay,
                                                 momentum=0.9)
 
-
-
     def learn(self, images, labels, group_ids):
         self.train()
-
 
         # Forward
         features = self.featurizer(images)

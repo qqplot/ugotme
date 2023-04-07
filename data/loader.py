@@ -64,7 +64,6 @@ def get_loader(dataset, sampler_type, uniform_over_groups=False,
 
 def get_dataset(args, only_train=False):
 
-
     if args.dataset == 'femnist':
         train_dataset = FEMNISTDataset('train', args.data_dir, args)
         val_dataset = FEMNISTDataset('val', args.data_dir, args)

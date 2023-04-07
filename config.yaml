@@ -1,0 +1,72 @@
+reproducibility: True
+seed: 0
+
+state: None
+
+noisy: True
+
+# Train / test
+train: 0
+test: 1
+ckpt_folders: 'mnist_ori50_0_20230203-002701'  # only applicable when train is 0 and test is 1
+progress_bar: 0
+
+
+# Training / Optimization args
+num_epochs: 200
+optimizer: 'adam'
+learning_rate: 1e-4
+weight_decay: 0
+
+# Data args
+dataset: 'mnist' # ['mnist', 'femnist', 'cifar-c', 'tinyimg']
+data_dir: '../data/'
+
+# Data sampling
+sampler: 'group' # ['standard', 'group']
+uniform_over_groups: 1 # Sample across groups uniformly
+meta_batch_size: 6 # Number of classes
+support_size: 50 # Support size: same as what we call batch size in the appendix
+shuffle_train: 1 # Only relevant when no group sampling = 0 and --uniform_over_groups 0
+drop_last: 0
+loading_type: 'jpeg' # ['PIL', 'jpeg'] Whether to use PIL or jpeg4py when loading images. Jpeg is faster. See README for deatiles
+num_workers: 8 # Num workers for pytorch data loader
+pin_memory: 1 # Pytorch loader pin memory. Best practice is to use this
+
+
+
+# Evalaution
+n_samples_per_group: 300 # Number of examples to evaluate on per test distribution
+test_n_samples_per_group: None # Number of examples to evaluate on per test distribution
+epochs_per_eval: 10
+
+# Test
+eval_on: ['val', 'test']
+
+# DANN
+lambd: 0.01
+d_steps_per_g_step: 1
+
+# Logging
+seeds: [0]
+plot: 0
+exp_name: 'arm_cml'
+debug: 0
+log_wandb: 0
+
+
+# Model args
+model: 'convnet' # ['resnet50', 'convnet', 'convnet_unc']
+pretrained: 1 # Pretrained resnet
+
+# Method
+algorithm: 'ARM-CML' # ['ERM', 'DRNN', 'ARM-CML', 'ARM-BN', 'ARM-LL', 'DANN', 'MMD', 'MY-ARM-CML', 'ARM-CML-UNC']
+
+# ARM-CML
+n_context_channels: 12 # Used when using a convnet/resnet
+context_net: 'convnet'
+pret_add_channels: 1
+adapt_bn: 0
+
+# ARM-CML-UNC
+dropout_rate: 0.3

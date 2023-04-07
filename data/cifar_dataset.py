@@ -82,6 +82,7 @@ class CIFARDataset(Dataset):
 
     def __len__(self):
         return self._len
+    
     def __getitem__(self, index):
         x = self.transform(**{'image': self._X[index]})['image']
         y = torch.tensor(self._y[index], dtype=torch.long)

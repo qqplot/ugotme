@@ -9,7 +9,7 @@ import wandb
 
 import data
 import utils
-from algorithm import init_algorithm
+
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = "TRUE"
 
@@ -34,7 +34,7 @@ def run_epoch(algorithm, loader, train, progress_bar=True):
 
         # Forward
         if train:
-            logits, batch_stats = algorithm.learn(images, labels, group_ids, train)
+            logits, batch_stats = algorithm.learn(images, labels, group_ids)
             if logits is None: # DANN
                 continue
         else:
@@ -46,13 +46,13 @@ def run_epoch(algorithm, loader, train, progress_bar=True):
 
     return torch.cat(epoch_logits), torch.cat(epoch_labels), torch.cat(epoch_group_ids)
 
-def train(args):
+def train(args, algorithm):
 
     # Get data
     train_loader, _, val_loader, _ = data.get_loaders(args)
     args.n_groups = train_loader.dataset.n_groups
 
-    algorithm = init_algorithm(args, train_loader.dataset)
+    # algorithm = init_algorithm(args, train_loader.dataset)
     saver = utils.Saver(algorithm, args.device, args.ckpt_dir)
 
     # Train loop
@@ -104,6 +104,62 @@ def get_group_iterator(loader, group, support_size, n_samples_per_group=None):
 
     return batches
 
+
+def get_group_iterator_noisy(args, loader, group, support_size, n_samples_per_group=None):
+    example_ids = np.nonzero(loader.dataset.group_ids == group)[0]
+    
+    example_ids_not_group = np.nonzero(loader.dataset.group_ids != group)[0]
+    example_ids_not_group = np.random.choice(example_ids_not_group, len(example_ids), replace=False)
+    
+    example_ids = example_ids[np.random.permutation(len(example_ids))] # Shuffle example ids
+
+    # Create batches
+    batches = []
+    X, Y, G = [], [], []
+    X_noise, Y_noise, G_noise = [], [], []
+    num_noise = args.num_noise
+    if args.num_noise >= support_size:
+        print(f"num_noise is {args.num_noise} and support_size is {support_size}!!!")
+        num_noise = support_size
+
+    for i, (idx, idx_not_group) in enumerate(zip(example_ids, example_ids_not_group)):
+        x, y, g = loader.dataset[idx]
+        x_noise, y_noise, g_noise = loader.dataset[idx_not_group]     
+
+        X.append(x); Y.append(y); G.append(g)
+        X_noise.append(x_noise); Y_noise.append(y_noise); G_noise.append(g_noise)
+        
+        if (i + 1) % support_size == 0:
+            X[len(X)-num_noise:] = X_noise[:num_noise]
+            Y[len(Y)-num_noise:] = Y_noise[:num_noise]
+            G[len(G)-num_noise:] = G_noise[:num_noise]
+
+            if args.noise_type == 'front':               
+                X = X[len(X)-num_noise:].copy() + X_noise[:len(X)-num_noise]
+                Y = Y[len(Y)-num_noise:].copy() + Y_noise[:len(Y)-num_noise]
+                G = G[len(G)-num_noise:].copy() + G_noise[:len(G)-num_noise]
+
+            elif args.noise_type == 'random':
+                randIdx = np.arange(len(X))
+                np.random.shuffle(randIdx)
+
+                X = list(np.array(X)[randIdx])
+                Y = list(np.array(Y)[randIdx])
+                G = list(np.array(G)[randIdx])
+
+            X, Y, G = torch.stack(X), torch.tensor(Y, dtype=torch.long), torch.tensor(G, dtype=torch.long)
+            batches.append((X, Y, G))
+            X, Y, G = [], [], []
+            X_noise, Y_noise, G_noise = [], [], []
+
+        if n_samples_per_group is not None and i == (n_samples_per_group - 1):
+            break
+    if X:
+        X, Y, G = torch.stack(X), torch.tensor(Y, dtype=torch.long), torch.tensor(G, dtype=torch.long)
+        batches.append((X, Y, G))
+
+    return batches
+
 def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_per_group=None):
     """ Test model on groups and log to wandb
 
@@ -120,11 +176,15 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
 
     # Loop over each group
     for i, group in tqdm(enumerate(loader.dataset.groups), desc='Evaluating', total=len(loader.dataset.groups)):
-        counter = 0
-        group_iterator = get_group_iterator(loader, group, args.support_size, n_samples_per_group)
+        
+        if args.noisy:
+            num_noise = 1 if args.num_noise else args.num_noise
+            group_iterator = get_group_iterator_noisy(args, loader, group, args.support_size, n_samples_per_group)
+        else:
+            group_iterator = get_group_iterator(loader, group, args.support_size, n_samples_per_group)
 
-        logits, labels, group_ids = run_epoch(algorithm, group_iterator, train=False, progress_bar=False)
-        preds = np.argmax(logits, axis=1)
+        probs, labels, group_ids = run_epoch(algorithm, group_iterator, train=False, progress_bar=False)
+        preds = np.argmax(probs, axis=1)
 
         # Evaluate
         accuracy = np.mean((preds == labels).numpy())

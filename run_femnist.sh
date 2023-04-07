@@ -6,7 +6,7 @@
 #SBATCH --time=0-12:00:00
 #SBATCH --mem=16000MB
 #SBATCH --cpus-per-task=8
-#SBATCH --output=./slurm_log/S-%x.%j.out
+#SBATCH --output=./slurm_log/femnist/S-%x.%j.out
 
 eval "$(conda shell.bash hook)"
 conda activate maicon
