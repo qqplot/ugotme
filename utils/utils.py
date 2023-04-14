@@ -1,5 +1,5 @@
 import argparse
-from algorithm.models import ContextNet, ConvNet, ResNet, ConvNetUNC, MLP
+from algorithm.models import ContextNet, ConvNet, ResNet, ConvNetUNC, MLP, ContextNetEx
 from algorithm.algorithm import ERM, DRNN, MMD, ARM_LL, DANN, ARM_BN, ARM_CML, ARM_CUSUM, ARM_UNC
 import torch
 from torch import nn
@@ -36,6 +36,9 @@ def make_arm_train_parser():
     parser.add_argument('--noise_type', type=str, default='random', choices=['random', 'front', 'back'])  
     parser.add_argument('--beta', type=float, default=1.0, help='coef of exponential distribution') 
     parser.add_argument('--T', type=int, default=3, help='num of iter') 
+    parser.add_argument('--mask', type=int, default=None, help='masking loss if 1') 
+    parser.add_argument('--mask_p', type=float, default=0.3, help='proportion of masking logits') 
+    parser.add_argument('--normalize', type=int, default=0, help='normalize or not') 
 
     return parser
 
@@ -56,7 +59,7 @@ def update_arm_parser(args):
         args.meta_batch_size = 3
         args.support_size = 100
         args.n_context_channels = 3
-        args.num_epochs = 100
+        # args.num_epochs = 100
         args.n_samples_per_group = 2000
         args.test_n_samples_per_group = 3000
         args.optimizer = 'sgd'
@@ -67,12 +70,13 @@ def update_arm_parser(args):
         args.meta_batch_size = 3
         args.support_size = 100
         args.n_context_channels = 3
-        args.num_epochs = 50        
+        args.optimizer = 'sgd'
+        # args.num_epochs = 50        
         args.n_samples_per_group = 2000
         args.test_n_samples_per_group = 3000
         args.weight_decay = 1e-4
         args.learning_rate = 1e-2 
-        args.adapt_bn = 1        # Need to check  
+        # args.adapt_bn = 1        # Need to check  
         args.model = 'resnet50'  # Need to check
 
 
@@ -104,13 +108,12 @@ def add_common_args(parser):
 
     # Torch
     parser.add_argument('--num_workers', type=int, default=8, help='Num workers for pytorch data loader')
-    parser.add_argument('--pin_memory', type=int, default=1, help='Pytorch loader pin memory. \
-                        Best practice is to use this')
+    parser.add_argument('--pin_memory', type=int, default=1, help='Pytorch loader pin memory. Best practice is to use this')
     parser.add_argument('--device_id', type=int, default=0, help='device_id')
 
     # Evalaution
-    parser.add_argument('--n_samples_per_group', type=int, default=300, help='Number of examples to evaluate on per test distribution')
-    parser.add_argument('--test_n_samples_per_group', type=int, default=None, help='Number of examples to evaluate on per test distribution')
+    parser.add_argument('--n_samples_per_group', type=int, default=300, help='Number of examples to evaluate on per test distribution For EVAL')
+    parser.add_argument('--test_n_samples_per_group', type=int, default=None, help='Number of examples to evaluate on per test distribution For TEST')
     parser.add_argument('--epochs_per_eval', type=int, default=10)
 
     # Test
@@ -137,7 +140,7 @@ def add_model_args(parser):
 
     # ARM-CML
     parser.add_argument('--n_context_channels', type=int, default=12, help='Used when using a convnet/resnet')
-    # parser.add_argument('--context_net', type=str, default='convnet', choices=['convnet']) # ContextNet
+    parser.add_argument('--context_net', type=str, default='ContextNet', choices=['ContextNet', 'ContextNetEx']) # ContextNet
     parser.add_argument('--pret_add_channels', type=int, default=1)
     parser.add_argument('--adapt_bn', type=int, default=0)
     parser.add_argument('--dropout_rate', type=float, default=0.3)
@@ -170,7 +173,11 @@ def init_algorithm(args):
     if args.algorithm in ['ARM-CML', 'ARM-CUSUM', 'ARM-UNC']:
         n_channels = n_img_channels + args.n_context_channels
         hidden_dim = 64
-        context_net = ContextNet(n_img_channels, args.n_context_channels,
+        if args.context_net == 'ContextNetEx':
+            context_net = ContextNetEx(n_img_channels, args.n_context_channels,
+                                 hidden_dim=hidden_dim, kernel_size=5).to(args.device)
+        else:
+            context_net = ContextNet(n_img_channels, args.n_context_channels,
                                  hidden_dim=hidden_dim, kernel_size=5).to(args.device)
     else:
         n_channels = n_img_channels
@@ -238,6 +245,7 @@ def init_algorithm(args):
         hparams['support_size'] = args.support_size
         hparams['n_context_channels'] = args.n_context_channels
         hparams['adapt_bn'] = args.adapt_bn
+        hparams['normalize'] = args.normalize
         print("Algorithm is ARM_CUSUM.")
         algorithm = ARM_CUSUM(model, loss_fn, args.device, context_net, hparams)
 

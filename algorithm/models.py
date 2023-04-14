@@ -31,6 +31,31 @@ class MLP(nn.Module):
 
         return out
 
+class ContextNetEx(nn.Module):
+
+    def __init__(self, in_channels, out_channels, hidden_dim, kernel_size):
+        super(ContextNet, self).__init__()
+
+        # Keep same dimensions
+        padding = (kernel_size - 1) // 2
+
+        self.context_net = nn.Sequential(
+                                nn.Conv2d(in_channels, hidden_dim, kernel_size, padding=padding),
+                                nn.BatchNorm2d(hidden_dim),
+                                nn.ReLU(),
+                                nn.Conv2d(hidden_dim, hidden_dim, kernel_size, padding=padding),
+                                nn.BatchNorm2d(hidden_dim),
+                                nn.ReLU(),
+                                nn.Conv2d(hidden_dim, out_channels, kernel_size, padding=padding),
+                                nn.BatchNorm2d(out_channels), # added
+                                nn.ReLU(), # added
+                            )
+
+
+    def forward(self, x):
+        out = self.context_net(x)
+        return out
+
 class ContextNet(nn.Module):
 
     def __init__(self, in_channels, out_channels, hidden_dim, kernel_size):
@@ -46,7 +71,9 @@ class ContextNet(nn.Module):
                                 nn.Conv2d(hidden_dim, hidden_dim, kernel_size, padding=padding),
                                 nn.BatchNorm2d(hidden_dim),
                                 nn.ReLU(),
-                                nn.Conv2d(hidden_dim, out_channels, kernel_size, padding=padding)
+                                nn.Conv2d(hidden_dim, out_channels, kernel_size, padding=padding),
+                                # nn.BatchNorm2d(out_channels), # added
+                                # nn.ReLU(), # added
                             )
 
 
@@ -105,7 +132,7 @@ class ConvNetUNC(nn.Module):
         self.final = nn.Sequential(
                     nn.Linear(hidden_dim, 200),
                     nn.ReLU(),
-                    nn.Dropout(p=self.dropout_rate),
+                    # nn.Dropout(p=self.dropout_rate),
                     Identity() if return_features else nn.Linear(200, num_classes)
                   )
         self.num_features = 200
@@ -202,7 +229,10 @@ class ResNet(nn.Module):
                  avgpool=False, return_features=False):
         super(ResNet, self).__init__()
 
-        self.model = torchvision.models.__dict__[model_name](pretrained=pretrained)
+        if pretrained:
+            weights = 'ResNet50_Weights.DEFAULT'
+
+        self.model = torchvision.models.__dict__[model_name](weights=weights)
         self.num_features = self.model.fc.in_features
         if return_features:
             self.model.fc = Identity()

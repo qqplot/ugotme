@@ -17,7 +17,7 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = "TRUE"
 ####################
 ###### TRAIN #######
 ####################
-def run_epoch(algorithm, loader, train, progress_bar=True):
+def run_epoch(algorithm, loader, train, progress_bar=True, mask=None, mask_p=1.0):
 
     epoch_labels = []
     epoch_logits = []
@@ -34,7 +34,10 @@ def run_epoch(algorithm, loader, train, progress_bar=True):
 
         # Forward
         if train:
-            logits, batch_stats = algorithm.learn(images, labels, group_ids)
+            if mask:
+                logits, batch_stats = algorithm.learn(images, labels, group_ids, mask, mask_p)
+            else:
+                logits, batch_stats = algorithm.learn(images, labels, group_ids)
             if logits is None: # DANN
                 continue
         else:
@@ -59,7 +62,7 @@ def train(args, algorithm):
     best_worst_case_acc = 0
 
     for epoch in trange(args.num_epochs):
-        epoch_logits, epoch_labels, epoch_group_ids = run_epoch(algorithm, train_loader, train=True, progress_bar=args.progress_bar)
+        epoch_logits, epoch_labels, epoch_group_ids = run_epoch(algorithm, train_loader, train=True, progress_bar=args.progress_bar, mask=args.mask, mask_p=args.mask_p)
 
         if epoch % args.epochs_per_eval == 0:
             stats = eval_groupwise(args, algorithm, val_loader, epoch, split='val', n_samples_per_group=args.n_samples_per_group)
@@ -82,6 +85,7 @@ def train(args, algorithm):
 
 def get_group_iterator(loader, group, support_size, n_samples_per_group=None):
     example_ids = np.nonzero(loader.dataset.group_ids == group)[0]
+    # print("example_ids", len(example_ids)) # 3333
     example_ids = example_ids[np.random.permutation(len(example_ids))] # Shuffle example ids
 
     # Create batches

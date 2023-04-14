@@ -225,6 +225,7 @@ class ARM_CUSUM(ERM):
         self.context_net = context_net
         self.support_size = hparams['support_size']
         self.n_context_channels = hparams['n_context_channels']
+        self.normalize = hparams['normalize']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
         self.init_optimizers(params)
@@ -241,11 +242,51 @@ class ARM_CUSUM(ERM):
         context = self.context_net(x) # Shape: batch_size, channels, H, W
 
         context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
-        context = context.cumsum(dim=1) # Shape: meta_batch_size, self.n_context_channels
+        context = context.cumsum(dim=1) # Shape: meta_batch_size, support_size, self.n_context_channels, h, w
+
+        if self.normalize:
+            length_tensor = torch.arange(1, support_size+1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)
+            context = torch.div(context, length_tensor)
+
         context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size          
 
         x = torch.cat([x, context], dim=1)
         return self.model(x)
+
+
+    def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
+        
+        self.train()
+
+        # Forward
+        logits = self.predict(images) # batch, num_class
+
+        if mask:
+            # Apply the mask
+            random_mask = torch.randn(len(logits)).float().ge(mask_p).float().to(self.device)
+            labels = labels * random_mask
+            labels = labels.long()
+
+            random_mask = random_mask.unsqueeze(1).expand_as(logits)
+            logits = logits * random_mask
+            
+            loss = self.loss_fn(logits, labels) / mask_p
+
+        else:
+            loss = self.loss_fn(logits, labels)
+        self.update(loss)
+
+        stats = {
+                 'objective': loss.detach().item(),
+                }
+
+        return logits, stats
+
+    def update(self, loss):
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
 
 class ARM_UNC(ERM):
 
@@ -255,7 +296,7 @@ class ARM_UNC(ERM):
         self.context_net = context_net
         self.support_size = hparams['support_size']
         self.n_context_channels = hparams['n_context_channels']
-        self.beta = hparams['beta']
+        self.beta = nn.Parameter(hparams['beta'], requires_grad=True)
         self.T = hparams['T']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())

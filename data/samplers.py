@@ -54,7 +54,7 @@ class GroupSampler:
             # Sample groups according to the size of the group
             sampled_groups = np.random.choice(self.groups, size=(n_batches, self.meta_batch_size), p=self.group_prob)
 
-        group_sizes = np.zeros(sampled_groups.shape)
+        # group_sizes = np.zeros(sampled_groups.shape)
 
         for batch_id in range(self.num_batches):
 
