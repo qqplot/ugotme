@@ -77,19 +77,41 @@ class ERM(nn.Module):
         accuracy = np.mean(preds == labels.detach().cpu().numpy().reshape(-1))
         return accuracy
 
-    def learn(self, images, labels, group_ids=None):
+    # def learn(self, images, labels, group_ids=None):
+        
+    #     self.train()
+
+    #     # Forward
+    #     logits = self.predict(images)
+    #     loss = self.loss_fn(logits, labels)
+    #     self.update(loss)
+
+    #     stats = {
+    #              'objective': loss.detach().item(),
+    #             }
+
+    #     return logits, stats
+
+    def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
         
         self.train()
 
         # Forward
-        logits = self.predict(images)
-        loss = self.loss_fn(logits, labels)
+        logits = self.predict(images) # batch, num_class
+
+        # Apply the mask
+        if mask:
+            random_mask = torch.randn(len(logits)).float().ge(mask_p).float().to(self.device)
+            labels = labels * random_mask
+            labels = labels.long()
+            random_mask = random_mask.unsqueeze(1).expand_as(logits)
+            logits = logits * random_mask
+            loss = self.loss_fn(logits, labels) / mask_p
+        else:
+            loss = self.loss_fn(logits, labels)
+
         self.update(loss)
-
-        stats = {
-                 'objective': loss.detach().item(),
-                }
-
+        stats = { 'objective': loss.detach().item(), }
         return logits, stats
 
 class DRNNLossComputer:
@@ -213,7 +235,8 @@ class ARM_CML(ERM):
             # print("context.size:", context.size())
             context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
             context = context.mean(dim=1) # Shape: meta_batch_size, self.n_context_channels
-            context = torch.repeat_interleave(context, repeats=support_size, dim=0) # meta_batch_size * support_size, context_size
+            context = torch.repeat_interleave(context, repeats=support_size, dim=0) # meta_batch_size * support_size, context_size            
+            
             x = torch.cat([x, context], dim=1)
             return self.model(x)
 
@@ -222,10 +245,25 @@ class ARM_CUSUM(ERM):
     def __init__(self, model, loss_fn, device, context_net, hparams={}):
         super().__init__(model, loss_fn, device, hparams)
 
-        self.context_net = context_net
+        self.context_net = context_net      
+
+        self.context_norm = None
+        if hparams['norm_type'] == 'layer':
+            _, h, w = hparams['input_shape']
+            self.context_norm = nn.LayerNorm((hparams['n_context_channels'], h, w),
+                                             elementwise_affine=True,
+                                             device=device
+                                             )
+        elif hparams['norm_type'] == 'instance':
+            self.context_norm = nn.InstanceNorm3d(hparams['n_context_channels'], 
+                                                  affine=False,
+                                                  device=device)
+            
         self.support_size = hparams['support_size']
         self.n_context_channels = hparams['n_context_channels']
         self.normalize = hparams['normalize']
+        self.norm_type = hparams['norm_type']
+        self.input_shape = hparams['input_shape']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
         self.init_optimizers(params)
@@ -246,46 +284,15 @@ class ARM_CUSUM(ERM):
 
         if self.normalize:
             length_tensor = torch.arange(1, support_size+1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)
-            context = torch.div(context, length_tensor)
+            context = torch.div(context, length_tensor.detach())
+
+        if self.context_norm is not None:
+            context = self.context_norm(context)
 
         context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size          
 
         x = torch.cat([x, context], dim=1)
         return self.model(x)
-
-
-    def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
-        
-        self.train()
-
-        # Forward
-        logits = self.predict(images) # batch, num_class
-
-        if mask:
-            # Apply the mask
-            random_mask = torch.randn(len(logits)).float().ge(mask_p).float().to(self.device)
-            labels = labels * random_mask
-            labels = labels.long()
-
-            random_mask = random_mask.unsqueeze(1).expand_as(logits)
-            logits = logits * random_mask
-            
-            loss = self.loss_fn(logits, labels) / mask_p
-
-        else:
-            loss = self.loss_fn(logits, labels)
-        self.update(loss)
-
-        stats = {
-                 'objective': loss.detach().item(),
-                }
-
-        return logits, stats
-
-    def update(self, loss):
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
 
 
 class ARM_UNC(ERM):
@@ -301,7 +308,6 @@ class ARM_UNC(ERM):
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
         self.init_optimizers(params)
-
 
     def predict(self, x, train=False):
         batch_size, c, h, w = x.shape
@@ -372,24 +378,9 @@ class ARM_UNC(ERM):
             probs = F.softmax(torch.stack(outputs, dim=0), dim=-1).mean(dim=0)
             return probs
 
-        
         # disable_dropout(self.model)            
         return self.model(x)
     
-    def learn(self, images, labels, group_ids=None):
-        
-        self.train()
-
-        # Forward
-        logits = self.predict(images, train=True)
-        loss = self.loss_fn(logits, labels)
-        self.update(loss)
-
-        stats = {
-                 'objective': loss.detach().item(),
-                }
-
-        return logits, stats
 
 
 class ARM_LL(ERM):

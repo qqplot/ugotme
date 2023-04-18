@@ -60,6 +60,7 @@ def train(args, algorithm):
 
     # Train loop
     best_worst_case_acc = 0
+    best_average_acc = 0
 
     for epoch in trange(args.num_epochs):
         epoch_logits, epoch_labels, epoch_group_ids = run_epoch(algorithm, train_loader, train=True, progress_bar=args.progress_bar, mask=args.mask, mask_p=args.mask_p)
@@ -67,17 +68,23 @@ def train(args, algorithm):
         if epoch % args.epochs_per_eval == 0:
             stats = eval_groupwise(args, algorithm, val_loader, epoch, split='val', n_samples_per_group=args.n_samples_per_group)
 
-            # Track early stopping values with respect to worst case.
-            if stats['val/worst_case_acc'] > best_worst_case_acc:
-                best_worst_case_acc = stats['val/worst_case_acc']
-                saver.save(epoch, is_best=True)
 
+            if args.worst_case:
+                # Track early stopping values with respect to worst case.
+                if stats['val/worst_case_acc'] > best_worst_case_acc:
+                    best_worst_case_acc = stats['val/worst_case_acc']
+                    saver.save(epoch, is_best=True)
+            else:
+                # Track early stopping values with respect to worst case.
+                if stats['val/average_acc'] > best_average_acc:
+                    best_average_acc = stats['val/average_acc']
+                    saver.save(epoch, is_best=True)
 
             # Log early stopping values
             if args.log_wandb:
                 wandb.log({"val/best_worst_case_acc": best_worst_case_acc})
 
-            print(f"\nEpoch: ", epoch, "\nWorst Case Acc: ", stats['val/worst_case_acc'])
+            print(f"\nEpoch: ", epoch, "\nWorst Case Acc: ", stats['val/worst_case_acc'], "Average Acc: ", stats['val/average_acc'])
 
 ##############################
 ###### Evaluate / Test #######

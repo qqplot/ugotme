@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torchvision
-
+import torch.nn.functional as F
 
 class Identity(nn.Module):
     def __init__(self):
@@ -33,27 +33,54 @@ class MLP(nn.Module):
 
 class ContextNetEx(nn.Module):
 
-    def __init__(self, in_channels, out_channels, hidden_dim, kernel_size):
-        super(ContextNet, self).__init__()
+    def __init__(self, input_shape, out_channels, hidden_dim, kernel_size, norm_type='batch'):
+        super(ContextNetEx, self).__init__()
 
         # Keep same dimensions
+        in_channels, h, w = input_shape
         padding = (kernel_size - 1) // 2
 
-        self.context_net = nn.Sequential(
-                                nn.Conv2d(in_channels, hidden_dim, kernel_size, padding=padding),
-                                nn.BatchNorm2d(hidden_dim),
-                                nn.ReLU(),
-                                nn.Conv2d(hidden_dim, hidden_dim, kernel_size, padding=padding),
-                                nn.BatchNorm2d(hidden_dim),
-                                nn.ReLU(),
-                                nn.Conv2d(hidden_dim, out_channels, kernel_size, padding=padding),
-                                nn.BatchNorm2d(out_channels), # added
-                                nn.ReLU(), # added
-                            )
+        self.conv1 = nn.Conv2d(in_channels, hidden_dim, kernel_size, padding=padding)
+
+        if norm_type == 'layer':
+            self.norm1 = nn.LayerNorm([hidden_dim, h, w])
+        elif norm_type == 'instance':
+            self.norm1 = nn.InstanceNorm2d(hidden_dim)
+        else:
+            self.norm1 = nn.BatchNorm2d(hidden_dim)
+
+        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size, padding=padding)
+
+        if norm_type == 'layer':
+            self.norm2 = nn.LayerNorm([hidden_dim, h, w])
+        elif norm_type == 'instance':
+            self.norm2 = nn.InstanceNorm2d(hidden_dim)
+        else:
+            self.norm2 = nn.BatchNorm2d(hidden_dim)
+
+        self.final = nn.Conv2d(hidden_dim, out_channels, kernel_size, padding=padding)
+
+        if norm_type == 'layer':
+            self.norm3 = nn.LayerNorm([hidden_dim, h, w])
+        elif norm_type == 'instance':
+            self.norm3 = nn.InstanceNorm2d(hidden_dim)
+        else:
+            self.norm3 = nn.BatchNorm2d(hidden_dim)
+
 
 
     def forward(self, x):
-        out = self.context_net(x)
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = F.relu(x)
+
+        x = self.conv2(x)
+        x = self.norm2(x)
+        x = F.relu(x)
+
+        out = self.final(x)
+        out = self.norm3(out)
+        out = F.relu(x)
         return out
 
 class ContextNet(nn.Module):

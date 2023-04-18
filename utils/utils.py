@@ -39,7 +39,10 @@ def make_arm_train_parser():
     parser.add_argument('--mask', type=int, default=None, help='masking loss if 1') 
     parser.add_argument('--mask_p', type=float, default=0.3, help='proportion of masking logits') 
     parser.add_argument('--normalize', type=int, default=0, help='normalize or not') 
+    parser.add_argument('--worst_case', type=int, default=1, help='validation with worst_case or not') 
+    parser.add_argument('--norm_type', type=str, default='batch', choices=['batch', 'layer', 'instance']) 
 
+    
     return parser
 
 
@@ -156,29 +159,41 @@ def init_algorithm(args):
         num_classes = 10
         num_train_domains = 14
         n_img_channels = 1
+        input_shape = (n_img_channels, 28, 28)
     elif args.dataset == 'femnist':
         num_classes = 62
         num_train_domains = 262
         n_img_channels = 1
-    elif args.dataset in 'tinyimg':
-        num_classes = 200
-        num_train_domains = 51
-        n_img_channels = 3
+        input_shape = (n_img_channels, 28, 28)
     elif args.dataset in 'cifar-c':
         num_classes = 10
         num_train_domains = 56
         n_img_channels = 3
+        input_shape = (n_img_channels, 32, 32)        
+    elif args.dataset in 'tinyimg':
+        num_classes = 200
+        num_train_domains = 51
+        n_img_channels = 3
+        input_shape = (n_img_channels, 64, 64)
+
 
     # Channels of main model
     if args.algorithm in ['ARM-CML', 'ARM-CUSUM', 'ARM-UNC']:
         n_channels = n_img_channels + args.n_context_channels
         hidden_dim = 64
         if args.context_net == 'ContextNetEx':
-            context_net = ContextNetEx(n_img_channels, args.n_context_channels,
-                                 hidden_dim=hidden_dim, kernel_size=5).to(args.device)
+            print("Context network is", args.norm_type)            
+            context_net = ContextNetEx(input_shape, 
+                                       args.n_context_channels,
+                                       hidden_dim=hidden_dim, 
+                                       kernel_size=5,
+                                       norm_type=args.norm_type
+                                       ).to(args.device)
         else:
-            context_net = ContextNet(n_img_channels, args.n_context_channels,
-                                 hidden_dim=hidden_dim, kernel_size=5).to(args.device)
+            context_net = ContextNet(in_channels=n_img_channels, 
+                                     out_channels=args.n_context_channels,
+                                     hidden_dim=hidden_dim, 
+                                     kernel_size=5).to(args.device)
     else:
         n_channels = n_img_channels
 
@@ -238,6 +253,7 @@ def init_algorithm(args):
         hparams['support_size'] = args.support_size
         hparams['n_context_channels'] = args.n_context_channels
         hparams['adapt_bn'] = args.adapt_bn
+        hparams['norm_type'] = args.norm_type
         print("Algorithm is ARM_CML.")
         algorithm = ARM_CML(model, loss_fn, args.device, context_net, hparams)
 
@@ -246,6 +262,9 @@ def init_algorithm(args):
         hparams['n_context_channels'] = args.n_context_channels
         hparams['adapt_bn'] = args.adapt_bn
         hparams['normalize'] = args.normalize
+        hparams['norm_type'] = args.norm_type
+        hparams['input_shape'] = input_shape
+        
         print("Algorithm is ARM_CUSUM.")
         algorithm = ARM_CUSUM(model, loss_fn, args.device, context_net, hparams)
 
