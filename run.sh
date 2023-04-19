@@ -1,45 +1,86 @@
 #!/bin/bash
 
-#SBATCH --job-name=arm_unc_large
+#SBATCH --job-name=new_cusum_small_layer
 #SBATCH --gres=gpu:1
 #SBATCH --time=0-12:00:00
 #SBATCH --mem=16000MB
 #SBATCH --cpus-per-task=8
-#SBATCH --output=./slurm_log/S-%x.%j.out
+#SBATCH --output=./slurm_log/mnist/S-%x.%j.out
 
 eval "$(conda shell.bash hook)"
 conda activate maicon
 
 
-SEEDS="0"
+SEEDS="0 1 2"
 SHARED_ARGS="\
     --data_dir ./data/\
-    --dataset femnist \
+    --dataset mnist \
     --train 1 \
     --num_epochs 200 \
     --n_context_channels 12 \
     --eval_on val test \
-    --seeds ${SEEDS} \
-    --dropout_rate 0.5 \
-    --model convnet_unc \
+    --seeds 0 1 2 \
+    --dropout_rate 0.3 \
+    --model convnet \
     --T 3 \
     --auto 1 \
     --beta 1.0 \
-    --epochs_per_eval 20 \
-    --smaller_model 0 \
+    --epochs_per_eval 10 \
+    --smaller_model 1 \
+    --mask 0\
+    --mask_p 0.4\
+    --norm_type layer \
+    --normalize 0
     "
     
 
 # Origin: Train (Batch 6 * 50)
-# srun python run.py --algorithm ERM --auto 1 --exp_name arm_unc_femnist $SHARED_ARGS
+srun python run.py --algorithm ARM-CUSUM --meta_batch_size 6 --support_size 50 --exp_name new_cusum_small_layer $SHARED_ARGS
 
 
 
-srun python run.py --algorithm ARM-UNC --meta_batch_size 2 --support_size 50 --exp_name arm_unc_large $SHARED_ARGS
 
 
 
-# python run.py --eval_on test --test 1 --train 0 --ckpt_folders mnist_unc_coef2_drop30_6_50_0_20230320-103020 --meta_batch_size 1 --support_size 1  
+# srun python run.py --algorithm ARM-CML --meta_batch_size 6 --support_size 50 --exp_name cml_not_context_small $SHARED_ARGS
+# srun python run_test.py --eval_on test --auto 1 --test 1 --train 0 --online 1 --normalize 1 --ckpt_folders mnist_new_cml_small_norm_m10_0_20230419-214657 mnist_new_cml_small_norm_m10_1_20230419-215758 mnist_new_cml_small_norm_m10_2_20230419-220856
+
+
+
+
+# mnist_new_cml_small_norm_m50_0_20230419-122910 mnist_new_cml_small_norm_m50_1_20230419-124512 mnist_new_cml_small_norm_m50_2_20230419-130036
+
+
+
+# mnist_new_cml_small_norm_m30_0_20230419-215643 mnist_new_cml_small_norm_m30_1_20230419-220834 mnist_new_cml_small_norm_m30_2_20230419-222025
+
+
+# mnist_cusum_small_m50_normalize_0_20230414-190354 mnist_cusum_small_m50_normalize_1_20230414-191452 mnist_cusum_small_m50_normalize_2_20230414-192550
+
+
+# mnist_cusum_small_normalize_0_20230414-172641 mnist_cusum_small_normalize_1_20230414-173717 mnist_cusum_small_normalize_2_20230414-174752
+
+
+
+#  mnist_cusum_small_0_20230414-111749 mnist_cusum_small_1_20230414-112822 mnist_cusum_small_2_20230414-113855
+
+
+# mnist_arm-cml_0_20230412-232027 mnist_arm-cml_1_20230412-233133 mnist_arm-cml_2_20230412-234236
+
+
+
+
+
+
+
+
+# srun python run_test.py --eval_on test --auto 1 --test 1 --train 0 --seeds ${SEEDS} --ckpt_folders mnist_cusum_small_0_20230414-111749 mnist_cusum_small_1_20230414-112822 mnist_cusum_small_2_20230414-113855
+# python run.py --eval_on test --meta_batch_size 1 --support_size 199 --test 1 --train 0 --seeds 0 1 2 --ckpt_folders mnist_cusum_small_0_20230414-111749 mnist_cusum_small_1_20230414-112822 mnist_cusum_small_2_20230414-113855
+# python run.py --eval_on test --meta_batch_size 1 --support_size 1 --test 1 --train 0 --seeds 0 1 2 --ckpt_folders mnist_cusum_small_0_20230414-111749 mnist_cusum_small_1_20230414-112822 mnist_cusum_small_2_20230414-113855
+
+
+
+
 # python run.py --eval_on test --test 1 --train 0 --ckpt_folders mnist_unc_coef05_drop30_6_50_0_20230318-101158 --meta_batch_size 1 --support_size 1  
 # python run.py --eval_on test --test 1 --train 0 --ckpt_folders mnist_unc_drop30_6_50_0_20230315-104713 --meta_batch_size 1 --support_size 1  
 # python run_bk.py --eval_on test --test 1 --train 0 --ckpt_folders mnist_ori50_0_20230203-002701 --meta_batch_size 6 --support_size 50 --noisy 1

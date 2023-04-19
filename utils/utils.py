@@ -4,6 +4,7 @@ from algorithm.algorithm import ERM, DRNN, MMD, ARM_LL, DANN, ARM_BN, ARM_CML, A
 import torch
 from torch import nn
 from pathlib import Path
+import numpy as np
 
 
 CPU_DEVICE = torch.device('cpu')
@@ -41,6 +42,7 @@ def make_arm_train_parser():
     parser.add_argument('--normalize', type=int, default=0, help='normalize or not') 
     parser.add_argument('--worst_case', type=int, default=1, help='validation with worst_case or not') 
     parser.add_argument('--norm_type', type=str, default='batch', choices=['batch', 'layer', 'instance']) 
+    parser.add_argument('--online', type=int, default=0, help='online test yn') 
 
     
     return parser
@@ -225,7 +227,10 @@ def init_algorithm(args):
     if args.algorithm in ['DRNN']:
         loss_fn = nn.CrossEntropyLoss(reduction='none')
     else:
-        loss_fn = nn.CrossEntropyLoss()
+        if args.mask:
+            loss_fn = nn.CrossEntropyLoss(reduction='none')
+        else:
+            loss_fn = nn.CrossEntropyLoss() # reduction='none'
 
     # Algorithm
     hparams = {'optimizer': args.optimizer,
@@ -253,7 +258,8 @@ def init_algorithm(args):
         hparams['support_size'] = args.support_size
         hparams['n_context_channels'] = args.n_context_channels
         hparams['adapt_bn'] = args.adapt_bn
-        hparams['norm_type'] = args.norm_type
+        hparams['online'] = args.online
+        hparams['normalize'] = args.normalize
         print("Algorithm is ARM_CML.")
         algorithm = ARM_CML(model, loss_fn, args.device, context_net, hparams)
 
@@ -307,3 +313,43 @@ class Saver:
             torch.save(self.algorithm, ckpt_path)
 
         self.algorithm.to(self.device)
+
+
+
+class ScoreKeeper:
+
+    def __init__(self, splits, n_seeds):
+
+        self.splits = splits
+        self.n_seeds = n_seeds
+
+        self.results = {}
+        for split in splits:
+            self.results[split] = {}
+
+    def log(self, stats):
+        for split in stats:
+            split_stats = stats[split]
+            for key in split_stats:
+                value = split_stats[key]
+                metric_name = key.split('/')[1]
+
+                if metric_name not in self.results[split]:
+                    self.results[split][metric_name] = []
+
+                self.results[split][metric_name].append(value)
+
+    def print_stats(self, metric_names=['worst_case_acc', 'average_acc', 'empirical_acc']):
+
+        for split in self.splits:
+            print("Split: ", split)
+
+            for metric_name in metric_names:
+
+                values = np.array(self.results[split][metric_name])
+                avg = np.mean(values)
+                standard_error = 0
+                if self.n_seeds > 1:
+                    standard_error =  np.std(values) / np.sqrt(self.n_seeds - 1)
+
+                print(f"{metric_name}: {avg}, standard error: {standard_error}")

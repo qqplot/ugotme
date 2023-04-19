@@ -101,12 +101,9 @@ class ERM(nn.Module):
 
         # Apply the mask
         if mask:
-            random_mask = torch.randn(len(logits)).float().ge(mask_p).float().to(self.device)
-            labels = labels * random_mask
-            labels = labels.long()
-            random_mask = random_mask.unsqueeze(1).expand_as(logits)
-            logits = logits * random_mask
-            loss = self.loss_fn(logits, labels) / mask_p
+            random_mask = torch.randn(len(labels)).float().ge(mask_p).float().to(self.device)
+            loss = self.loss_fn(logits, labels) * random_mask
+            loss = torch.sum(loss) / torch.sum(random_mask)
         else:
             loss = self.loss_fn(logits, labels)
 
@@ -207,6 +204,8 @@ class ARM_CML(ERM):
         self.support_size = hparams['support_size']
         self.n_context_channels = hparams['n_context_channels']
         self.adapt_bn = hparams['adapt_bn']
+        self.normalize = hparams['normalize']
+        self.online = hparams['online']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
         self.init_optimizers(params)
@@ -230,12 +229,18 @@ class ARM_CML(ERM):
                 x_i = torch.cat([x_i, context_i], dim=1)
                 out.append(self.model(x_i))
             return torch.cat(out)
-        else:
+        else:            
             context = self.context_net(x) # Shape: batch_size, channels, H, W
-            # print("context.size:", context.size())
             context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
-            context = context.mean(dim=1) # Shape: meta_batch_size, self.n_context_channels
-            context = torch.repeat_interleave(context, repeats=support_size, dim=0) # meta_batch_size * support_size, context_size            
+
+            if self.model.training is False and self.online:               
+                context = context.cumsum(dim=1)
+                length_tensor = torch.arange(1, support_size+1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)
+                context = torch.div(context, length_tensor.detach())               
+                context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size           
+            else:
+                context = context.mean(dim=1) # Shape: meta_batch_size, self.n_context_channels
+                context = torch.repeat_interleave(context, repeats=support_size, dim=0) # meta_batch_size * support_size, context_size            
             
             x = torch.cat([x, context], dim=1)
             return self.model(x)

@@ -8,6 +8,7 @@ import wandb
 import torch
 
 import utils
+from utils import ScoreKeeper
 import train as train
 import data as data
 
@@ -27,43 +28,6 @@ def set_seed(seed, cuda):
     random.seed(seed)
 
 
-class ScoreKeeper:
-
-    def __init__(self, splits, n_seeds):
-
-        self.splits = splits
-        self.n_seeds = n_seeds
-
-        self.results = {}
-        for split in splits:
-            self.results[split] = {}
-
-    def log(self, stats):
-        for split in stats:
-            split_stats = stats[split]
-            for key in split_stats:
-                value = split_stats[key]
-                metric_name = key.split('/')[1]
-
-                if metric_name not in self.results[split]:
-                    self.results[split][metric_name] = []
-
-                self.results[split][metric_name].append(value)
-
-    def print_stats(self, metric_names=['worst_case_acc', 'average_acc', 'empirical_acc']):
-
-        for split in self.splits:
-            print("Split: ", split)
-
-            for metric_name in metric_names:
-
-                values = np.array(self.results[split][metric_name])
-                avg = np.mean(values)
-                standard_error = 0
-                if self.n_seeds > 1:
-                    standard_error =  np.std(values) / np.sqrt(self.n_seeds - 1)
-
-                print(f"{metric_name}: {avg}, standard error: {standard_error}")
 
 
 def test(args, algorithm, seed, eval_on):
@@ -104,6 +68,7 @@ def main():
         score_keeper = ScoreKeeper(args.eval_on, len(args.seeds))
         print("args seeds: ", args.seeds)
         ckpt_dirs = []
+        ckpt_names = []
 
         for ind, seed in enumerate(args.seeds):
             print("seeeed: ", seed)
@@ -115,6 +80,7 @@ def main():
             name = args.dataset + '_' + args.exp_name + '_' + str(seed)
             args.ckpt_dir = Path('output') / 'checkpoints' / f'{name}_{datetime_now}'
             ckpt_dirs.append(args.ckpt_dir)
+            ckpt_names.append(f'{name}_{datetime_now}')
             print("CHECKPOINT DIR: ", args.ckpt_dir)
 
             if args.debug: 
@@ -139,7 +105,8 @@ def main():
                 stats = test(args, algorithm, seed, eval_on=args.eval_on)
                 score_keeper.log(stats)
 
-        print("Ckpt dirs: \n ", ckpt_dirs)
+        print("Checkpoint dirs: \n ", ckpt_dirs)
+        print("Checkpoint names \n ", ckpt_names)
         score_keeper.print_stats()
 
     elif args.test and args.ckpt_folders: # test a set of already trained models

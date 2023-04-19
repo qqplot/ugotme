@@ -20,5 +20,5 @@ data/femnist/
 data/CIFAR-10-C-new/
 data/CIFAR-10-C/
 data/Tiny-ImageNet-C-new
-
+data/Tiny-ImageNet-C/
 **/*.tar

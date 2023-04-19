@@ -47,7 +47,7 @@ def run_epoch(algorithm, loader, train, progress_bar=True, mask=None, mask_p=1.0
         epoch_logits.append(logits.to('cpu').clone().detach())
         epoch_group_ids.append(group_ids.to('cpu').clone().detach())
 
-    return torch.cat(epoch_logits), torch.cat(epoch_labels), torch.cat(epoch_group_ids)
+    return torch.cat(epoch_logits), torch.cat(epoch_labels), torch.cat(epoch_group_ids), epoch_logits, epoch_labels, epoch_group_ids
 
 def train(args, algorithm):
 
@@ -63,7 +63,7 @@ def train(args, algorithm):
     best_average_acc = 0
 
     for epoch in trange(args.num_epochs):
-        epoch_logits, epoch_labels, epoch_group_ids = run_epoch(algorithm, train_loader, train=True, progress_bar=args.progress_bar, mask=args.mask, mask_p=args.mask_p)
+        _, _, _, epoch_logits, epoch_labels, epoch_group_ids = run_epoch(algorithm, train_loader, train=True, progress_bar=args.progress_bar, mask=args.mask, mask_p=args.mask_p)
 
         if epoch % args.epochs_per_eval == 0:
             stats = eval_groupwise(args, algorithm, val_loader, epoch, split='val', n_samples_per_group=args.n_samples_per_group)
@@ -179,6 +179,7 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
     groups = []
     accuracies = np.zeros(len(loader.dataset.groups))
     num_examples = np.zeros(len(loader.dataset.groups))
+    online_accuracies = []
 
     if args.adapt_bn:
         algorithm.train()
@@ -194,10 +195,17 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
         else:
             group_iterator = get_group_iterator(loader, group, args.support_size, n_samples_per_group)
 
-        probs, labels, group_ids = run_epoch(algorithm, group_iterator, train=False, progress_bar=False)
+        probs, labels, group_ids, epoch_logits, epoch_labels, epoch_group_ids = run_epoch(algorithm, group_iterator, train=False, progress_bar=False)
         preds = np.argmax(probs, axis=1)
 
         # Evaluate
+        if args.test and args.online:
+
+            for i, logits in enumerate(epoch_logits):
+                preds_online = np.argmax(logits, axis=1)
+                label = epoch_labels[i]
+                online_accuracies.append((preds_online == label).numpy().astype(int)) 
+                       
         accuracy = np.mean((preds == labels).numpy())
         num_examples[group] = len(labels)
         accuracies[group] = accuracy
@@ -226,7 +234,8 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
                 f'{split}/worst_case_group_size': worst_case_group_size,
                 f'{split}/average_acc': average_case_acc,
                 f'{split}/total_size': total_size,
-                f'{split}/empirical_acc': empirical_case_acc
+                f'{split}/empirical_acc': empirical_case_acc,
+                f'{split}/online_acc': online_accuracies
             }
 
     if epoch is not None:
