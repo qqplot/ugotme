@@ -251,12 +251,12 @@ class ARM_CUSUM(ERM):
         super().__init__(model, loss_fn, device, hparams)
 
         self.context_net = context_net      
-
+        self.affine_on = hparams['affine_on']
         self.context_norm = None
         if hparams['norm_type'] == 'layer':
             _, h, w = hparams['input_shape']
             self.context_norm = nn.LayerNorm((hparams['n_context_channels'], h, w),
-                                             elementwise_affine=True,
+                                             elementwise_affine=bool(self.affine_on),
                                              device=device
                                              )
         elif hparams['norm_type'] == 'instance':

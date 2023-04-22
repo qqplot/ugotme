@@ -22,3 +22,5 @@ data/CIFAR-10-C/
 data/Tiny-ImageNet-C-new
 data/Tiny-ImageNet-C/
 **/*.tar
+
+run_debug.sh

@@ -43,6 +43,7 @@ def make_arm_train_parser():
     parser.add_argument('--worst_case', type=int, default=1, help='validation with worst_case or not') 
     parser.add_argument('--norm_type', type=str, default='batch', choices=['batch', 'layer', 'instance']) 
     parser.add_argument('--online', type=int, default=0, help='online test yn') 
+    parser.add_argument('--affine_on', type=int, default=0, help='elementwise_affine on yn') 
 
     
     return parser
@@ -270,6 +271,7 @@ def init_algorithm(args):
         hparams['normalize'] = args.normalize
         hparams['norm_type'] = args.norm_type
         hparams['input_shape'] = input_shape
+        hparams['affine_on'] = args.affine_on
         
         print("Algorithm is ARM_CUSUM.")
         algorithm = ARM_CUSUM(model, loss_fn, args.device, context_net, hparams)
