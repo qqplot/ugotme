@@ -136,6 +136,7 @@ class ConvNetUNC(nn.Module):
                         nn.Conv2d(num_channels, hidden_dim, kernel_size, padding=padding),
                         nn.BatchNorm2d(hidden_dim),
                         nn.ReLU(),
+                        nn.Dropout(p=self.dropout_rate),                        
                     )
             
             self.conv1 = nn.Sequential(
@@ -159,7 +160,7 @@ class ConvNetUNC(nn.Module):
         self.final = nn.Sequential(
                     nn.Linear(hidden_dim, 200),
                     nn.ReLU(),
-                    # nn.Dropout(p=self.dropout_rate),
+                    nn.Dropout(p=self.dropout_rate),
                     Identity() if return_features else nn.Linear(200, num_classes)
                   )
         self.num_features = 200
@@ -181,6 +182,46 @@ class ConvNetUNC(nn.Module):
         out = self.final(out)
 
         return out
+
+
+class ResNetContext(nn.Module):
+
+    def __init__(self, input_shape, in_channels, out_channels, model_name, pretrained=None,
+                 avgpool=False):
+        super(ResNetContext, self).__init__()
+
+        if pretrained:
+            weights = 'ResNet50_Weights.DEFAULT'
+
+        self.input_shape = input_shape
+        self.model = torchvision.models.__dict__[model_name](weights=weights)
+        self.num_features = self.model.fc.in_features
+
+        self.model.fc = nn.Linear(self.num_features, out_channels)
+
+        # Change number of input channels from 3 to whatever is needed
+        # to take in the context also.
+        model_inplanes = 64
+        old_weights = self.model.conv1.weight.data
+        self.model.conv1 = nn.Conv2d(in_channels, model_inplanes,
+                            kernel_size=7, stride=2, padding=3, bias=False)
+
+        if pretrained:
+            for i in range(in_channels):
+                self.model.conv1.weight.data[:, i, :, :] = old_weights[:, i % 3, :, :]
+
+        if avgpool:
+            self.model.avgpool = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, x):
+        out = self.model(x)
+        c, h, w = self.input_shape
+        out = out.view(-1, c, h, w)
+        return out
+
+
+
+
 
 
 class ConvNet(nn.Module):

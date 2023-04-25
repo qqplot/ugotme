@@ -1,5 +1,5 @@
 import argparse
-from algorithm.models import ContextNet, ConvNet, ResNet, ConvNetUNC, MLP, ContextNetEx
+from algorithm.models import ContextNet, ConvNet, ResNet, ConvNetUNC, MLP, ContextNetEx, ResNetContext
 from algorithm.algorithm import ERM, DRNN, MMD, ARM_LL, DANN, ARM_BN, ARM_CML, ARM_CUSUM, ARM_UNC
 import torch
 from torch import nn
@@ -149,7 +149,7 @@ def add_model_args(parser):
     parser.add_argument('--context_net', type=str, default='ContextNet', choices=['ContextNet', 'ContextNetEx']) # ContextNet
     parser.add_argument('--pret_add_channels', type=int, default=1)
     parser.add_argument('--adapt_bn', type=int, default=0)
-    parser.add_argument('--dropout_rate', type=float, default=0.3)
+    parser.add_argument('--dropout_rate', type=float, default=0.2)
 
     # DANN
     parser.add_argument('--lambd', type=float, default=0.01)
@@ -186,12 +186,17 @@ def init_algorithm(args):
         hidden_dim = 64
         if args.context_net == 'ContextNetEx':
             print("Context network is", args.norm_type)            
-            context_net = ContextNetEx(input_shape, 
-                                       args.n_context_channels,
-                                       hidden_dim=hidden_dim, 
-                                       kernel_size=5,
-                                       norm_type=args.norm_type
-                                       ).to(args.device)
+            # context_net = ContextNetEx(input_shape, 
+            #                            args.n_context_channels,
+            #                            hidden_dim=hidden_dim, 
+            #                            kernel_size=5,
+            #                            norm_type=args.norm_type
+            #                            ).to(args.device)
+            context_net = ResNetContext(input_shape=(args.n_context_channels, 64, 64),
+                                        in_channels=n_img_channels, 
+                                        out_channels=args.n_context_channels * 64 * input_shape[2],
+                                        model_name='resnet50',
+                                        pretrained=args.pretrained).to(args.device)
         else:
             context_net = ContextNet(in_channels=n_img_channels, 
                                      out_channels=args.n_context_channels,
@@ -261,6 +266,7 @@ def init_algorithm(args):
         hparams['adapt_bn'] = args.adapt_bn
         hparams['online'] = args.online
         hparams['normalize'] = args.normalize
+        hparams['T'] = args.T
         print("Algorithm is ARM_CML.")
         algorithm = ARM_CML(model, loss_fn, args.device, context_net, hparams)
 
@@ -272,6 +278,7 @@ def init_algorithm(args):
         hparams['norm_type'] = args.norm_type
         hparams['input_shape'] = input_shape
         hparams['affine_on'] = args.affine_on
+        hparams['T'] = args.T
         
         print("Algorithm is ARM_CUSUM.")
         algorithm = ARM_CUSUM(model, loss_fn, args.device, context_net, hparams)
@@ -280,6 +287,10 @@ def init_algorithm(args):
         hparams['support_size'] = args.support_size
         hparams['n_context_channels'] = args.n_context_channels
         hparams['adapt_bn'] = args.adapt_bn
+        hparams['normalize'] = args.normalize
+        hparams['norm_type'] = args.norm_type
+        hparams['input_shape'] = input_shape
+        hparams['affine_on'] = args.affine_on
         hparams['beta'] = args.beta
         hparams['T'] = args.T
 

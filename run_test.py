@@ -83,7 +83,11 @@ def test_online():
         algorithm = torch.load(args.ckpt_path).to(args.device)
         algorithm.support_size = args.support_size
         algorithm.normalize = args.normalize
-        algorithm.context_norm = None
+        algorithm.online = args.online
+        algorithm.T = args.T
+        
+        if args.norm_type == 'batch':
+            algorithm.context_norm = None
         
         stats = test(args, algorithm, seed, eval_on=args.eval_on)
         
