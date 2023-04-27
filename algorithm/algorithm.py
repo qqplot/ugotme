@@ -96,6 +96,7 @@ class ERM(nn.Module):
         stats = { 'objective': loss.detach().item(), }
         return logits, stats
 
+
 class DRNNLossComputer:
     """ Adapted from public DRNN repo"""
     def __init__(self, criterion, is_robust, n_groups, alpha=None, gamma=0.1, adj=None,
@@ -195,8 +196,6 @@ class ARM_CML(ERM):
         self.T = hparams['T']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
-        if self.context_net is not None:
-            params += list(self.context_norm.parameters())
 
         self.init_optimizers(params)
 
@@ -253,6 +252,8 @@ class ARM_CUSUM(ERM):
         self.context_net = context_net      
         self.affine_on = hparams['affine_on']
         self.T = hparams['T']
+        self.beta = nn.Parameter(torch.tensor(hparams['beta']), requires_grad=True)
+
         self.context_norm = None
         if hparams['norm_type'] == 'layer':
             _, h, w = hparams['input_shape']
@@ -272,7 +273,7 @@ class ARM_CUSUM(ERM):
         self.input_shape = hparams['input_shape']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
-        if self.context_net is not None:
+        if self.affine_on:
             params += list(self.context_norm.parameters())
 
         self.init_optimizers(params)
@@ -289,6 +290,10 @@ class ARM_CUSUM(ERM):
         context = self.context_net(x) # Shape: batch_size, channels, H, W
 
         context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
+
+        # context[:, 4::5, :, :, :] = 0
+
+
         # context = context.cumsum(dim=1) # Shape: meta_batch_size, support_size, self.n_context_channels, h, w
         context_fwd = context.cumsum(dim=1)  # Shape: meta_batch_size, support_size, self.n_context_channels, h, w
         context_bwd = torch.flip(torch.flip(context, [1]).cumsum(dim=1), [1])
@@ -299,14 +304,19 @@ class ARM_CUSUM(ERM):
         else:
             length_tensor = torch.arange(1, support_size + 1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)
             context_fwd = torch.div(context_fwd, length_tensor.detach())
-            context_bwd = torch.div(context_bwd, length_tensor.detach())
+            context_bwd = torch.div(context_bwd, torch.flip(length_tensor, [1]).detach())
 
         context_fwd = context_fwd.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  # meta_batch_size * support_size, context_size
         context_bwd = context_bwd.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  # meta_batch_size * support_size, context_size
 
-        if self.training:
-            mask = (torch.rand(meta_batch_size * support_size, 1, 1, 1) > 0.5).float().to(self.device)
-            context = context_fwd * mask + context_bwd * (1 - mask)
+        if self.model.training:
+            # mask = (torch.rand(meta_batch_size * support_size, 1, 1, 1) > 0.5).float().to(self.device)
+            # mask = self.beta
+            # context = context_fwd * mask + context_bwd * (1 - mask)
+            x_fwd = torch.cat([x, context_fwd], dim=1)
+            x_bwd = torch.cat([x, context_bwd], dim=1)
+            x = torch.concat([x_fwd, x_bwd], dim=0)
+            return self.model(x)
         else:
             context = context_fwd
 
@@ -324,7 +334,28 @@ class ARM_CUSUM(ERM):
             probs = F.softmax(torch.stack(outputs, dim=0), dim=-1).mean(dim=0)
             return probs
 
+        # param = list(self.context_norm.parameters())
+        # W = param[0].data.tolist()
+        # b = param[1].data.tolist()
+        # print(f"context_norm - W: {W[0][0][0] }, b: {b[0][0][0]}")
         return self.model(x)
+
+    def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
+        
+        self.train()
+        # Forward
+        logits = self.predict(images) # batch * 2, num_class
+        # Apply the mask
+        if mask:
+            random_mask = torch.randn(len(labels)).float().ge(mask_p).float().to(self.device)
+            loss = self.loss_fn(logits, labels) * random_mask
+            loss = torch.sum(loss) / torch.sum(random_mask)
+        else:
+            loss = self.loss_fn(logits, torch.concat([labels, labels], dim=0))
+
+        self.update(loss)
+        stats = { 'objective': loss.detach().item(), }
+        return logits, stats
 
 
 class ARM_UNC(ERM):
@@ -348,10 +379,22 @@ class ARM_UNC(ERM):
                                                   device=device)                    
         self.support_size = hparams['support_size']
         self.normalize = hparams['normalize']
-        self.beta = nn.Parameter(torch.tensor(hparams['beta']), requires_grad=True)
-        self.T = hparams['T']
+        
+        self.eps = 1e-05
+        self.beta = torch.ones(1, device=device, requires_grad=bool(hparams['beta']))
+        # self.coef = torch.ones(1, device=device, requires_grad=bool(hparams['beta']))
 
+        self.T = hparams['T']
+        self.debug = hparams['debug']
+      
         params = list(self.model.parameters()) + list(self.context_net.parameters())
+
+        if bool(hparams['beta']):
+            params.append(self.beta)
+        
+        if self.affine_on:
+            params += list(self.context_norm.parameters())
+
         self.init_optimizers(params)
 
     def predict(self, x, train=False):
@@ -362,79 +405,226 @@ class ARM_UNC(ERM):
         else:
             meta_batch_size, support_size = 1, batch_size
         
-        if train:
-            self.context_net.train()
-        else:
-            self.context_net.eval()
-            self.model.eval()
-            enable_dropout(self.model)
-
+        enable_dropout(self.model)
+            
         context = self.context_net(x) # Shape: batch_size, channels, H, W
         x_reshape = x.reshape((meta_batch_size, support_size, c, h, w))
         x_reshape = x_reshape.permute((1, 0, 2, 3, 4))
         context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
         context = context.permute((1, 0, 2, 3, 4))
-        
+    
         T = self.T
         context_list = []
-        # ulist = []
+        # u_list, std_list = [], []
         c_prime = torch.zeros_like(context[0]) # Shape: meta_batch_size, n_context_channels, H, W
-        # ulist = []
         for idx, (x_, c_) in enumerate(zip(x_reshape, context)):
-            
             x_ = torch.cat([x_, c_prime], dim=1) # Shape: meta_batch_size, 2 * n_context_channels, H, W
-            out_prob = []    
-            with torch.no_grad():              
+
+            if self.debug:
+                u = 1   
+                c_prime = c_prime + u * c_
+                context_list.append(c_prime)
+                continue
+
+            with torch.no_grad():     
+                out_prob = []         
                 for _ in range(T):
                     outputs = self.model(x_) # Shape : meta_batch_size, num_classes
                     out_prob.append(F.softmax(outputs, dim=-1))
-            out_prob = torch.stack(out_prob)
-            out_std = torch.std(out_prob, dim=0)
-            out_prob = torch.mean(out_prob, dim=0)
-            max_value, max_idx = torch.max(out_prob, dim=1)
-            max_std = out_std.gather(1, max_idx.view(-1,1)).detach()
+                out_prob = torch.stack(out_prob)
+                out_std = torch.std(out_prob, dim=0)
+                out_prob = torch.mean(out_prob, dim=0)
+                max_value, max_idx = torch.max(out_prob, dim=1)
+                max_std = out_std.gather(1, max_idx.view(-1,1))
 
-            u = torch.exp(-self.beta * max_std).unsqueeze(-1).unsqueeze(-1)
-            # ulist.append(max_std.item()) # 0(100%) ~ 0.3(55%)
-            # u = 1.0
-            # u = torch.ones_like(max_std)
-            # u = torch.exp(-u).unsqueeze(-1).unsqueeze(-1).detach()
-            
-            c_prime = c_prime + u * c_
-            
-            # print("c_prime", c_prime.size())
+            u = torch.exp(-self.beta * max_std).unsqueeze(-1).unsqueeze(-1) + self.eps
+            # u_list.append(u.mean().item())
+            # std_list.append(max_std.mean().item())
+            # u = torch.exp(-torch.exp(self.beta) * max_std + self.alpha).unsqueeze(-1).unsqueeze(-1)
+            # print('u:', u)                
+            c_prime = u * c_
             context_list.append(c_prime)
-        # print("ulist:", min(ulist, max(ulist)))
-        context = torch.stack(context_list, dim=0) # support_size, meta_batch_size, context_size
-        context = context.permute((1, 0, 2, 3, 4)) # meta_batch_size, support_size, context_size
 
-        if self.normalize:
-            length_tensor = torch.arange(1, support_size+1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)
-            context = torch.div(context, length_tensor.detach())
+        
+        # u_mean = np.mean(u_list)
+        # std_mean = np.mean(std_list)
+        # print(f"u_mean: {u_mean:.4f}, std_mean: {std_mean:.4f}")
+
+        context = torch.stack(context_list, dim=0) # support_size, meta_batch_size, self.n_context_channels, h, w
+        context = context.permute((1, 0, 2, 3, 4)) # meta_batch_size, support_size, self.n_context_channels, h, w
+
+        context_fwd = context.cumsum(dim=1)
+        context_bwd = torch.flip(torch.flip(context, [1]).cumsum(dim=1), [1])
 
         if self.context_norm is not None:
-            context = self.context_norm(context)
+            context_fwd = self.context_norm(context_fwd)
+            context_bwd = self.context_norm(context_bwd)
+        else:
+            length_tensor = torch.arange(1, support_size + 1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)
+            context_fwd = torch.div(context_fwd, length_tensor.detach())
+            context_bwd = torch.div(context_bwd, length_tensor.detach())
 
-        context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size          
-        # print("context", context.size())        
-        
+        context_fwd = context_fwd.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  # meta_batch_size * support_size, context_size
+        context_bwd = context_bwd.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  # meta_batch_size * support_size, context_size
+
         x = x_reshape.permute((1, 0, 2, 3, 4))
         x = x.reshape((meta_batch_size * support_size, c, h, w))
-        x = torch.cat([x, context], dim=1)
+
         if train:
-            self.model.train()
-        else:
-            self.model.eval()
-            enable_dropout(self.model)
+            self.train(); self.model.train()
+            x_fwd = torch.cat([x, context_fwd], dim=1)
+            x_bwd = torch.cat([x, context_bwd], dim=1)
+            x = torch.concat([x_fwd, x_bwd], dim=0)
+            return self.model(x)
+        else: # Test time            
+            context = context_fwd
+            x = torch.cat([x, context], dim=1)
             outputs = []
             for _ in range(T):
                 outputs.append(self.model(x))
-            probs = F.softmax(torch.stack(outputs, dim=0), dim=-1).mean(dim=0)
-            return probs
 
-        # disable_dropout(self.model)            
-        return self.model(x)
-    
+            return F.softmax(torch.stack(outputs, dim=0), dim=-1).mean(dim=0)
+
+
+    def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
+        
+        self.train()
+        # Forward
+        logits = self.predict(images, train=True) # batch * 2, num_class
+        # Apply the mask
+        if mask:
+            random_mask = torch.randn(len(labels)).float().ge(mask_p).float().to(self.device)
+            loss = self.loss_fn(logits, labels) * random_mask
+            loss = torch.sum(loss) / torch.sum(random_mask)
+        else:
+            loss = self.loss_fn(logits, torch.concat([labels, labels], dim=0))
+
+        self.update(loss)
+        stats = { 'objective': loss.detach().item(), }
+        return logits, stats
+
+
+class ARM_CONF(ERM):
+
+    def __init__(self, model, loss_fn, device, context_net, hparams={}):
+        super().__init__(model, loss_fn, device, hparams)
+
+        self.context_net = context_net
+        self.affine_on = hparams['affine_on']
+        self.n_context_channels = hparams['n_context_channels']
+        self.context_norm = None
+        if hparams['norm_type'] == 'layer':
+            _, h, w = hparams['input_shape']
+            self.context_norm = nn.LayerNorm((hparams['n_context_channels'], h, w),
+                                             elementwise_affine=bool(self.affine_on),
+                                             device=device
+                                             )
+        elif hparams['norm_type'] == 'instance':
+            self.context_norm = nn.InstanceNorm3d(hparams['n_context_channels'], 
+                                                  affine=False,
+                                                  device=device)                    
+        self.support_size = hparams['support_size']
+        self.normalize = hparams['normalize']
+        
+        self.eps = 1e-05
+        self.beta = torch.ones(1, device=device, requires_grad=bool(hparams['beta']))
+        # self.coef = torch.ones(1, device=device, requires_grad=bool(hparams['beta']))
+
+        self.T = hparams['T']
+        self.debug = hparams['debug']
+      
+        params = list(self.model.parameters()) + list(self.context_net.parameters())
+
+        if bool(hparams['beta']):
+            params.append(self.beta)
+        
+        if self.affine_on:
+            params += list(self.context_norm.parameters())
+
+        self.init_optimizers(params)
+
+    def predict(self, x, train=False):
+        batch_size, c, h, w = x.shape
+
+        if batch_size % self.support_size == 0:
+            meta_batch_size, support_size = batch_size // self.support_size, self.support_size
+        else:
+            meta_batch_size, support_size = 1, batch_size
+        
+        context = self.context_net(x) # Shape: batch_size, channels, H, W
+        x_reshape = x.reshape((meta_batch_size, support_size, c, h, w))
+        x_reshape = x_reshape.permute((1, 0, 2, 3, 4))
+        context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
+        context = context.permute((1, 0, 2, 3, 4))
+
+        self.model.eval()
+        context_list = []
+        c_prime = torch.zeros_like(context[0]) # Shape: meta_batch_size, n_context_channels, H, W
+        for idx, (x_, c_) in enumerate(zip(x_reshape, context)):
+            x_ = torch.cat([x_, c_prime], dim=1) # Shape: meta_batch_size, 2 * n_context_channels, H, W
+
+            with torch.no_grad():
+                outputs = self.model(x_) # Shape : meta_batch_size, num_classes
+                confidence = F.softmax(outputs, dim=-1)
+                max_value, max_idx = torch.max(confidence, dim=1)
+
+            ###### 수정 필요 ######
+            # u = torch.exp(-self.beta * self.coef * torch.abs(torch.sub(max_value, 1))).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) + self.eps
+            u = torch.exp(-self.beta * torch.abs(torch.sub(max_value, 1))).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) + self.eps
+
+
+            c_prime = u * c_
+            context_list.append(c_prime)
+
+        context = torch.stack(context_list, dim=0) # support_size, meta_batch_size, self.n_context_channels, h, w
+        context = context.permute((1, 0, 2, 3, 4)) # meta_batch_size, support_size, self.n_context_channels, h, w
+
+        context_fwd = context.cumsum(dim=1)
+        context_bwd = torch.flip(torch.flip(context, [1]).cumsum(dim=1), [1])
+
+        if self.context_norm is not None:
+            context_fwd = self.context_norm(context_fwd)
+            context_bwd = self.context_norm(context_bwd)
+        else:
+            length_tensor = torch.arange(1, support_size + 1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)
+            context_fwd = torch.div(context_fwd, length_tensor.detach())
+            context_bwd = torch.div(context_bwd, length_tensor.detach())
+
+        context_fwd = context_fwd.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  # meta_batch_size * support_size, context_size
+        context_bwd = context_bwd.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  # meta_batch_size * support_size, context_size
+
+        x = x_reshape.permute((1, 0, 2, 3, 4))
+        x = x.reshape((meta_batch_size * support_size, c, h, w))
+
+        if train:
+            self.model.train(); self.train()
+            x_fwd = torch.cat([x, context_fwd], dim=1)
+            x_bwd = torch.cat([x, context_bwd], dim=1)
+            x = torch.concat([x_fwd, x_bwd], dim=0)
+            return self.model(x)
+        else: # Test time            
+            context = context_fwd
+            x = torch.cat([x, context], dim=1)
+            return self.model(x)
+
+
+    def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
+        
+        self.train()
+        # Forward
+        logits = self.predict(images, train=True) # batch * 2, num_class
+        # Apply the mask
+        if mask:
+            random_mask = torch.randn(len(labels)).float().ge(mask_p).float().to(self.device)
+            loss = self.loss_fn(logits, labels) * random_mask
+            loss = torch.sum(loss) / torch.sum(random_mask)
+        else:
+            loss = self.loss_fn(logits, torch.concat([labels, labels], dim=0))
+
+        self.update(loss)
+        stats = { 'objective': loss.detach().item(), }
+        return logits, stats
+
 
 
 class ARM_LL(ERM):

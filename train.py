@@ -4,6 +4,7 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import trange, tqdm
 import wandb
 
@@ -61,10 +62,21 @@ def train(args, algorithm):
     # Train loop
     best_worst_case_acc = 0
     best_average_acc = 0
+    
+
+    if args.scheduler == 'cosine':
+        scheduler = CosineAnnealingLR(optimizer=algorithm.optimizer, T_max=args.num_epochs)
+
 
     for epoch in trange(args.num_epochs):
         _, _, _, epoch_logits, epoch_labels, epoch_group_ids = run_epoch(algorithm, train_loader, train=True, progress_bar=args.progress_bar, mask=args.mask, mask_p=args.mask_p)
-
+        
+        if args.scheduler != 'none':
+            scheduler.step()
+        print(f"lr: {algorithm.optimizer.param_groups[0]['lr'] : .6f}", end='  ')
+        if args.algorithm in ['ARM-UNC', 'ARM-CONF']:
+            print(f"beta: {algorithm.beta.item():.4f}", end='  ')
+        print()
         if epoch % args.epochs_per_eval == 0:
             stats = eval_groupwise(args, algorithm, val_loader, epoch, split='val', n_samples_per_group=args.n_samples_per_group)
 
@@ -84,7 +96,7 @@ def train(args, algorithm):
             if args.log_wandb:
                 wandb.log({"val/best_worst_case_acc": best_worst_case_acc})
 
-            print(f"\nEpoch: ", epoch, "\nWorst Case Acc: ", stats['val/worst_case_acc'], "Average Acc: ", stats['val/average_acc'])
+            print(f"\nEpoch: {epoch}\nWorst Case Acc: {stats['val/worst_case_acc']:.4f}, Average Acc: {stats['val/average_acc']:.4f}")
 
 ##############################
 ###### Evaluate / Test #######
@@ -127,7 +139,6 @@ def get_group_iterator_noisy(args, loader, group, support_size, n_samples_per_gr
     # Create batches
     batches = []
     X, Y, G = [], [], []
-    X_noise, Y_noise, G_noise = [], [], []
     num_noise = args.num_noise
     if args.num_noise >= support_size:
         print(f"num_noise is {args.num_noise} and support_size is {support_size}!!!")
@@ -137,31 +148,15 @@ def get_group_iterator_noisy(args, loader, group, support_size, n_samples_per_gr
         x, y, g = loader.dataset[idx]
         x_noise, y_noise, g_noise = loader.dataset[idx_not_group]     
 
-        X.append(x); Y.append(y); G.append(g)
-        X_noise.append(x_noise); Y_noise.append(y_noise); G_noise.append(g_noise)
-        
+        if (i + 1) % num_noise == 0:
+            X.append(x_noise); Y.append(y_noise); G.append(g_noise)
+        else:
+            X.append(x); Y.append(y); G.append(g)
+       
         if (i + 1) % support_size == 0:
-            X[len(X)-num_noise:] = X_noise[:num_noise]
-            Y[len(Y)-num_noise:] = Y_noise[:num_noise]
-            G[len(G)-num_noise:] = G_noise[:num_noise]
-
-            if args.noise_type == 'front':               
-                X = X[len(X)-num_noise:].copy() + X_noise[:len(X)-num_noise]
-                Y = Y[len(Y)-num_noise:].copy() + Y_noise[:len(Y)-num_noise]
-                G = G[len(G)-num_noise:].copy() + G_noise[:len(G)-num_noise]
-
-            elif args.noise_type == 'random':
-                randIdx = np.arange(len(X))
-                np.random.shuffle(randIdx)
-
-                X = list(np.array(X)[randIdx])
-                Y = list(np.array(Y)[randIdx])
-                G = list(np.array(G)[randIdx])
-
             X, Y, G = torch.stack(X), torch.tensor(Y, dtype=torch.long), torch.tensor(G, dtype=torch.long)
             batches.append((X, Y, G))
             X, Y, G = [], [], []
-            X_noise, Y_noise, G_noise = [], [], []
 
         if n_samples_per_group is not None and i == (n_samples_per_group - 1):
             break

@@ -1,6 +1,6 @@
 import argparse
 from algorithm.models import ContextNet, ConvNet, ResNet, ConvNetUNC, MLP, ContextNetEx, ResNetContext
-from algorithm.algorithm import ERM, DRNN, MMD, ARM_LL, DANN, ARM_BN, ARM_CML, ARM_CUSUM, ARM_UNC
+from algorithm.algorithm import ERM, DRNN, MMD, ARM_LL, DANN, ARM_BN, ARM_CML, ARM_CUSUM, ARM_UNC, ARM_CONF
 import torch
 from torch import nn
 from pathlib import Path
@@ -44,8 +44,9 @@ def make_arm_train_parser():
     parser.add_argument('--norm_type', type=str, default='batch', choices=['batch', 'layer', 'instance']) 
     parser.add_argument('--online', type=int, default=0, help='online test yn') 
     parser.add_argument('--affine_on', type=int, default=0, help='elementwise_affine on yn') 
+    parser.add_argument('--scheduler', type=str, default='none', choices=['none', 'cosine']) 
+    parser.add_argument('--debug_unc', type=int, default=0)
 
-    
     return parser
 
 
@@ -142,7 +143,7 @@ def add_model_args(parser):
 
     # Method
     parser.add_argument('--algorithm', type=str, default='ERM', 
-                        choices=['ERM', 'DRNN', 'ARM-BN', 'ARM-LL', 'DANN', 'MMD', 'ARM-CML', 'ARM-CUSUM', 'ARM-UNC'])
+                        choices=['ERM', 'DRNN', 'ARM-BN', 'ARM-LL', 'DANN', 'MMD', 'ARM-CML', 'ARM-CUSUM', 'ARM-UNC', 'ARM-CONF'])
 
     # ARM-CML
     parser.add_argument('--n_context_channels', type=int, default=12, help='Used when using a convnet/resnet')
@@ -181,7 +182,7 @@ def init_algorithm(args):
 
 
     # Channels of main model
-    if args.algorithm in ['ARM-CML', 'ARM-CUSUM', 'ARM-UNC']:
+    if args.algorithm in ['ARM-CML', 'ARM-CUSUM', 'ARM-UNC', 'ARM-CONF']:
         n_channels = n_img_channels + args.n_context_channels
         hidden_dim = 64
         if args.context_net == 'ContextNetEx':
@@ -279,6 +280,7 @@ def init_algorithm(args):
         hparams['input_shape'] = input_shape
         hparams['affine_on'] = args.affine_on
         hparams['T'] = args.T
+        hparams['beta'] = args.beta
         
         print("Algorithm is ARM_CUSUM.")
         algorithm = ARM_CUSUM(model, loss_fn, args.device, context_net, hparams)
@@ -293,9 +295,25 @@ def init_algorithm(args):
         hparams['affine_on'] = args.affine_on
         hparams['beta'] = args.beta
         hparams['T'] = args.T
+        hparams['debug'] = args.debug_unc
 
         print("Algorithm is ARM_CML_UNC.")
         algorithm = ARM_UNC(model, loss_fn, args.device, context_net, hparams)
+
+    elif args.algorithm == 'ARM-CONF':
+        hparams['support_size'] = args.support_size
+        hparams['n_context_channels'] = args.n_context_channels
+        hparams['adapt_bn'] = args.adapt_bn
+        hparams['normalize'] = args.normalize
+        hparams['norm_type'] = args.norm_type
+        hparams['input_shape'] = input_shape
+        hparams['affine_on'] = args.affine_on
+        hparams['beta'] = args.beta
+        hparams['T'] = args.T
+        hparams['debug'] = args.debug_unc
+
+        print("Algorithm is ARM_CONF.")
+        algorithm = ARM_CONF(model, loss_fn, args.device, context_net, hparams)
 
     elif args.algorithm == 'ARM-LL':
         learned_loss_net = MLP(in_size=num_classes, norm_reduce=True).to(args.device)

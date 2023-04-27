@@ -11,21 +11,25 @@ import utils
 from utils import ScoreKeeper
 import train as train
 import data as data
+import tensorflow as tf
 
 
-# For reproducibility.
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
 
 
 def set_seed(seed, cuda):
 
     print('setting seed', seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
     torch.manual_seed(seed)
     if cuda:
         torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
+    tf.random.set_seed(seed)
+    os.environ['TF_DETERMINISTIC_OPS'] = '1'
+    os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+    
 
 
 
@@ -141,6 +145,9 @@ def main():
 
 
 if __name__ == '__main__':
+    # For reproducibility.
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     main()
 
