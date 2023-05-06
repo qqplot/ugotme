@@ -299,6 +299,7 @@ class ResNet(nn.Module):
 
         if pretrained:
             weights = 'ResNet50_Weights.DEFAULT'
+            # weights = 'ResNet50_Weights.IMAGENET1K_V1'
 
         self.model = torchvision.models.__dict__[model_name](weights=weights)
         self.num_features = self.model.fc.in_features
@@ -329,3 +330,47 @@ class ResNet(nn.Module):
 
 
 
+class ResNet_UNC(nn.Module):
+    def __init__(self, num_channels, num_classes, model_name, pretrained=None,
+                 avgpool=False, return_features=False, dropout_rate=0.2):
+        super(ResNet_UNC, self).__init__()
+
+        if pretrained:
+            weights = 'ResNet50_Weights.DEFAULT'
+            # weights = 'ResNet50_Weights.IMAGENET1K_V1'
+            
+
+        model_name = model_name.split('_')[0]
+        self.model = torchvision.models.__dict__[model_name](weights=weights)
+        self.num_features = self.model.fc.in_features
+        if return_features:
+            self.model.fc = Identity()
+        else:
+            self.model.fc = nn.Linear(self.num_features, num_classes)
+
+        # Change number of input channels from 3 to whatever is needed
+        # to take in the context also.
+        if num_channels != 3:
+            model_inplanes = 64
+            old_weights = self.model.conv1.weight.data
+            self.model.conv1 = nn.Conv2d(num_channels, model_inplanes,
+                             kernel_size=7, stride=2, padding=3, bias=False)
+
+            if pretrained:
+                for i in range(num_channels):
+                    self.model.conv1.weight.data[:, i, :, :] = old_weights[:, i % 3, :, :]
+
+        if avgpool:
+            self.model.avgpool = nn.AdaptiveAvgPool2d(1)
+
+        self.model.layer1.dropout = nn.Dropout(p=dropout_rate)
+        self.model.layer2.dropout = nn.Dropout(p=dropout_rate)
+        self.model.layer3.dropout = nn.Dropout(p=dropout_rate)
+        self.model.layer4.dropout = nn.Dropout(p=dropout_rate)
+
+        for name, module in self.model.named_modules():
+            print(name)
+
+    def forward(self, x):
+        out = self.model(x)
+        return out

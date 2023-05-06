@@ -194,6 +194,7 @@ class ARM_CML(ERM):
         self.normalize = hparams['normalize']
         self.online = hparams['online']
         self.T = hparams['T']
+        self.zero_context = hparams['zero_context']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
 
@@ -220,18 +221,56 @@ class ARM_CML(ERM):
             return torch.cat(out)
         else:            
             context = self.context_net(x) # Shape: batch_size, channels, H, W
+            
+            if self.zero_context:
+                zero_context = context.clone()
+                tmp = []
+                for i, c_ in enumerate(zero_context):
+                    if i > 0 and (i+1) % 5 == 0:
+                        tmp.append(torch.zeros_like(c_))
+                        continue
+                    tmp.append(c_)
+                zero_context = torch.stack(tmp).to(self.device)
+                zero_context = zero_context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
+
             context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
 
             if self.model.training is False and self.online:               
-                context = context.cumsum(dim=1)
-                length_tensor = torch.arange(1, support_size+1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)
-                context = torch.div(context, length_tensor.detach())               
+
+                if self.zero_context:
+
+                    num_order = []
+                    sum = 0
+                    for i in range(1, support_size+1):
+                        sum += 1
+                        if i % 5 == 0:
+                            sum -= 1
+                            num_order.append(1)
+                            continue
+                        num_order.append(sum)
+
+                    # length_tensor_zero = torch.arange(1, support_size+1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)                                                  
+                    length_tensor_zero = torch.tensor(num_order).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device) 
+                    
+                    zero_context = zero_context.cumsum(dim=1)
+                    zero_context = torch.div(zero_context, length_tensor_zero.detach())
+                    zero_context = zero_context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size           
+
+                context = context.cumsum(dim=1)  
+                length_tensor = torch.arange(1, support_size+1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)                                                  
+                context = torch.div(context, length_tensor.detach())           
                 context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size           
+
             else:
                 context = context.mean(dim=1) # Shape: meta_batch_size, self.n_context_channels
                 context = torch.repeat_interleave(context, repeats=support_size, dim=0) # meta_batch_size * support_size, context_size            
-            
-            x = torch.cat([x, context], dim=1)
+
+            if self.zero_context:
+                # zero_context = context.clone()
+                # zero_context[4::5, :, :, :] = 0
+                x = torch.cat([x, zero_context], dim=1)
+            else:
+                x = torch.cat([x, context], dim=1)
 
             if self.model.training is False and self.model.__class__.__name__ == 'ConvNetUNC':
                 self.model.eval()
@@ -250,6 +289,7 @@ class ARM_CUSUM(ERM):
         super().__init__(model, loss_fn, device, hparams)
 
         self.context_net = context_net      
+        self.adapt_bn = hparams['adapt_bn']
         self.affine_on = hparams['affine_on']
         self.T = hparams['T']
         self.beta = nn.Parameter(torch.tensor(hparams['beta']), requires_grad=True)
@@ -271,6 +311,7 @@ class ARM_CUSUM(ERM):
         self.normalize = hparams['normalize']
         self.norm_type = hparams['norm_type']
         self.input_shape = hparams['input_shape']
+        self.zero_context = hparams['zero_context']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
         if self.affine_on:
@@ -287,12 +328,22 @@ class ARM_CUSUM(ERM):
         else:
             meta_batch_size, support_size = 1, batch_size
 
+        if self.adapt_bn:
+            self.context_net.eval()
+            
         context = self.context_net(x) # Shape: batch_size, channels, H, W
+        if self.zero_context:
+            zero_context = context.clone()
+            tmp = []
+            for i, c_ in enumerate(zero_context):
+                if i > 0 and (i+1) % 5 == 0:
+                    tmp.append(torch.zeros_like(c_))
+                    continue
+                tmp.append(c_)
+            zero_context = torch.stack(tmp).to(self.device)
+            context = zero_context
 
         context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
-
-        # context[:, 4::5, :, :, :] = 0
-
 
         # context = context.cumsum(dim=1) # Shape: meta_batch_size, support_size, self.n_context_channels, h, w
         context_fwd = context.cumsum(dim=1)  # Shape: meta_batch_size, support_size, self.n_context_channels, h, w
@@ -309,7 +360,7 @@ class ARM_CUSUM(ERM):
         context_fwd = context_fwd.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  # meta_batch_size * support_size, context_size
         context_bwd = context_bwd.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  # meta_batch_size * support_size, context_size
 
-        if self.model.training:
+        if self.model.training and self.adapt_bn == 0:
             # mask = (torch.rand(meta_batch_size * support_size, 1, 1, 1) > 0.5).float().to(self.device)
             # mask = self.beta
             # context = context_fwd * mask + context_bwd * (1 - mask)
@@ -379,6 +430,7 @@ class ARM_UNC(ERM):
                                                   device=device)                    
         self.support_size = hparams['support_size']
         self.normalize = hparams['normalize']
+        self.zero_context = hparams['zero_context']
         
         self.eps = 1e-05
         self.beta = torch.ones(1, device=device, requires_grad=bool(hparams['beta']))
@@ -408,6 +460,18 @@ class ARM_UNC(ERM):
         enable_dropout(self.model)
             
         context = self.context_net(x) # Shape: batch_size, channels, H, W
+        if self.zero_context:
+            zero_context = context.clone()
+            tmp = []
+            for i, c_ in enumerate(zero_context):
+                if i > 0 and (i+1) % 5 == 0:
+                    tmp.append(torch.zeros_like(c_))
+                    continue
+                tmp.append(c_)
+            zero_context = torch.stack(tmp).to(self.device)
+            context = zero_context
+
+
         x_reshape = x.reshape((meta_batch_size, support_size, c, h, w))
         x_reshape = x_reshape.permute((1, 0, 2, 3, 4))
         context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))

@@ -1,5 +1,5 @@
 import argparse
-from algorithm.models import ContextNet, ConvNet, ResNet, ConvNetUNC, MLP, ContextNetEx, ResNetContext
+from algorithm.models import ContextNet, ConvNet, ResNet, ConvNetUNC, MLP, ContextNetEx, ResNetContext, ResNet_UNC
 from algorithm.algorithm import ERM, DRNN, MMD, ARM_LL, DANN, ARM_BN, ARM_CML, ARM_CUSUM, ARM_UNC, ARM_CONF
 import torch
 from torch import nn
@@ -38,14 +38,17 @@ def make_arm_train_parser():
     parser.add_argument('--beta', type=float, default=1.0, help='coef of exponential distribution') 
     parser.add_argument('--T', type=int, default=3, help='num of iter') 
     parser.add_argument('--mask', type=int, default=None, help='masking loss if 1') 
-    parser.add_argument('--mask_p', type=float, default=0.3, help='proportion of masking logits') 
+    parser.add_argument('--mask_p', type=float, default=0.2, help='proportion of masking logits') 
     parser.add_argument('--normalize', type=int, default=0, help='normalize or not') 
     parser.add_argument('--worst_case', type=int, default=1, help='validation with worst_case or not') 
     parser.add_argument('--norm_type', type=str, default='batch', choices=['batch', 'layer', 'instance']) 
     parser.add_argument('--online', type=int, default=0, help='online test yn') 
     parser.add_argument('--affine_on', type=int, default=0, help='elementwise_affine on yn') 
-    parser.add_argument('--scheduler', type=str, default='none', choices=['none', 'cosine']) 
+    parser.add_argument('--scheduler', type=str, default='none', choices=['none', 'cosine', 'cosine_warm']) 
     parser.add_argument('--debug_unc', type=int, default=0)
+    parser.add_argument('--zero_context', type=int, default=0)
+
+
 
     return parser
 
@@ -84,7 +87,7 @@ def update_arm_parser(args):
         args.weight_decay = 1e-4
         args.learning_rate = 1e-2 
         # args.adapt_bn = 1        # Need to check  
-        args.model = 'resnet50'  # Need to check
+        # args.model = 'resnet50'  # Need to check
 
 
 def add_common_args(parser):
@@ -138,7 +141,7 @@ def add_common_args(parser):
 
 def add_model_args(parser):
     # Model args
-    parser.add_argument('--model', type=str, default='convnet', choices=['resnet50', 'convnet', 'convnet_unc'])
+    parser.add_argument('--model', type=str, default='convnet', choices=['resnet50', 'convnet', 'convnet_unc', 'resnet50_unc'])
     parser.add_argument('--pretrained', type=int, default=1, help='Pretrained resnet')
 
     # Method
@@ -226,6 +229,12 @@ def init_algorithm(args):
                            smaller_model=bool(args.smaller_model), 
                            return_features=return_features, 
                            dropout_rate=args.dropout_rate)
+    elif args.model == 'resnet50_unc':
+        model = ResNet_UNC(num_channels=n_channels, num_classes=num_classes, model_name=args.model,
+                                     pretrained=args.pretrained, return_features=return_features,
+                                     dropout_rate=args.dropout_rate
+                                     )
+
 
     model = model.to(args.device)
 
@@ -268,6 +277,8 @@ def init_algorithm(args):
         hparams['online'] = args.online
         hparams['normalize'] = args.normalize
         hparams['T'] = args.T
+        hparams['zero_context'] = args.zero_context
+
         print("Algorithm is ARM_CML.")
         algorithm = ARM_CML(model, loss_fn, args.device, context_net, hparams)
 
@@ -281,6 +292,7 @@ def init_algorithm(args):
         hparams['affine_on'] = args.affine_on
         hparams['T'] = args.T
         hparams['beta'] = args.beta
+        hparams['zero_context'] = args.zero_context
         
         print("Algorithm is ARM_CUSUM.")
         algorithm = ARM_CUSUM(model, loss_fn, args.device, context_net, hparams)
@@ -296,6 +308,7 @@ def init_algorithm(args):
         hparams['beta'] = args.beta
         hparams['T'] = args.T
         hparams['debug'] = args.debug_unc
+        hparams['zero_context'] = args.zero_context
 
         print("Algorithm is ARM_CML_UNC.")
         algorithm = ARM_UNC(model, loss_fn, args.device, context_net, hparams)
@@ -311,6 +324,7 @@ def init_algorithm(args):
         hparams['beta'] = args.beta
         hparams['T'] = args.T
         hparams['debug'] = args.debug_unc
+        hparams['zero_context'] = args.zero_context
 
         print("Algorithm is ARM_CONF.")
         algorithm = ARM_CONF(model, loss_fn, args.device, context_net, hparams)

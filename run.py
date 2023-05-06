@@ -62,9 +62,6 @@ def main():
     args.cuda, args.device = utils.get_device_from_arg(args.device_id)
     print('Using device:', args.device)
 
-    algorithm = utils.init_algorithm(args) 
-    print('Args', '-'*50, '\n', args, '\n', '-'*50)
-
     start_time = datetime.now()
 
     if args.train:
@@ -100,7 +97,7 @@ def main():
                                  reinit=True)
                 wandb.config.update(args, allow_val_change=True)
 
-            train.train(args, algorithm)
+            train.train(args)
 
             # Test the model just trained on
             if args.test:
@@ -128,6 +125,7 @@ def main():
             seed = args.seeds[i]
             args.ckpt_path = Path('output') / 'checkpoints' / ckpt_folder / f'best.pkl' # final_weights.pkl
             algorithm = torch.load(args.ckpt_path).to(args.device)
+            algorithm.adapt_bn = args.adapt_bn
             stats = test(args, algorithm, seed, eval_on=args.eval_on)
             score_keeper.log(stats)
 

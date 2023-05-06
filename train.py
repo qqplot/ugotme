@@ -4,8 +4,9 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, CosineAnnealingWarmRestarts
 from tqdm import trange, tqdm
+import utils
 import wandb
 
 import data
@@ -50,45 +51,51 @@ def run_epoch(algorithm, loader, train, progress_bar=True, mask=None, mask_p=1.0
 
     return torch.cat(epoch_logits), torch.cat(epoch_labels), torch.cat(epoch_group_ids), epoch_logits, epoch_labels, epoch_group_ids
 
-def train(args, algorithm):
+def train(args):
 
     # Get data
     train_loader, _, val_loader, _ = data.get_loaders(args)
     args.n_groups = train_loader.dataset.n_groups
 
+    algorithm = utils.init_algorithm(args) 
+    print('Args', '-'*50, '\n', args, '\n', '-'*50)
+
     # algorithm = init_algorithm(args, train_loader.dataset)
     saver = utils.Saver(algorithm, args.device, args.ckpt_dir)
 
     # Train loop
-    best_worst_case_acc = 0
-    best_average_acc = 0
+    best_worst_case_acc, best_average_acc = 0, 0
     
-
     if args.scheduler == 'cosine':
         scheduler = CosineAnnealingLR(optimizer=algorithm.optimizer, T_max=args.num_epochs)
-
+    elif args.scheduler == 'step':
+        scheduler = StepLR(optimizer=algorithm.optimizer, step_size=10, gamma=0.5)
+    elif args.scheduler == 'cosine_warm':
+        scheduler = CosineAnnealingWarmRestarts(optimizer=algorithm.optimizer, T_0=10, T_mult=1, eta_min=0.00001)
 
     for epoch in trange(args.num_epochs):
         _, _, _, epoch_logits, epoch_labels, epoch_group_ids = run_epoch(algorithm, train_loader, train=True, progress_bar=args.progress_bar, mask=args.mask, mask_p=args.mask_p)
         
         if args.scheduler != 'none':
             scheduler.step()
-        print(f"lr: {algorithm.optimizer.param_groups[0]['lr'] : .6f}", end='  ')
+
+        print(f"Epoch {epoch} - lr: {algorithm.optimizer.param_groups[0]['lr'] : .6f}", end='  ')
         if args.algorithm in ['ARM-UNC', 'ARM-CONF']:
             print(f"beta: {algorithm.beta.item():.4f}", end='  ')
         print()
         if epoch % args.epochs_per_eval == 0:
             stats = eval_groupwise(args, algorithm, val_loader, epoch, split='val', n_samples_per_group=args.n_samples_per_group)
 
-
             if args.worst_case:
                 # Track early stopping values with respect to worst case.
                 if stats['val/worst_case_acc'] > best_worst_case_acc:
+                    print(f"\nBest updated at Epoch {epoch} !! - Worst: {stats['val/worst_case_acc']:.4f}, Avg: {stats['val/average_acc']:.4f}")
                     best_worst_case_acc = stats['val/worst_case_acc']
                     saver.save(epoch, is_best=True)
             else:
                 # Track early stopping values with respect to worst case.
                 if stats['val/average_acc'] > best_average_acc:
+                    print(f"Best updated at Epoch {epoch} !! - \nWorst Case Acc: {stats['val/worst_case_acc']:.4f}, Average Acc: {stats['val/average_acc']:.4f}")
                     best_average_acc = stats['val/average_acc']
                     saver.save(epoch, is_best=True)
 
