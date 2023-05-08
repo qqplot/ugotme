@@ -245,8 +245,6 @@ class ARM_CML(ERM):
                         sum += 1
                         if i % 5 == 0:
                             sum -= 1
-                            num_order.append(1)
-                            continue
                         num_order.append(sum)
 
                     # length_tensor_zero = torch.arange(1, support_size+1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)                                                  
@@ -256,7 +254,7 @@ class ARM_CML(ERM):
                     zero_context = torch.div(zero_context, length_tensor_zero.detach())
                     zero_context = zero_context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size           
 
-                context = context.cumsum(dim=1)  
+                context = context.cumsum(dim=1)
                 length_tensor = torch.arange(1, support_size+1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)                                                  
                 context = torch.div(context, length_tensor.detach())           
                 context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size           
@@ -479,7 +477,8 @@ class ARM_UNC(ERM):
     
         T = self.T
         context_list = []
-        # u_list, std_list = [], []
+        u_list, std_list = [], []
+        
         c_prime = torch.zeros_like(context[0]) # Shape: meta_batch_size, n_context_channels, H, W
         for idx, (x_, c_) in enumerate(zip(x_reshape, context)):
             x_ = torch.cat([x_, c_prime], dim=1) # Shape: meta_batch_size, 2 * n_context_channels, H, W
@@ -496,22 +495,31 @@ class ARM_UNC(ERM):
                     outputs = self.model(x_) # Shape : meta_batch_size, num_classes
                     out_prob.append(F.softmax(outputs, dim=-1))
                 out_prob = torch.stack(out_prob)
-                out_std = torch.std(out_prob, dim=0)
+                # out_std = torch.std(out_prob, dim=0)
                 out_prob = torch.mean(out_prob, dim=0)
-                max_value, max_idx = torch.max(out_prob, dim=1)
-                max_std = out_std.gather(1, max_idx.view(-1,1))
+                prediction_entropy = torch.sum(-out_prob * torch.log(out_prob), dim=-1).unsqueeze(-1).detach()
+                # print(prediction_entropy.size())
+                # max_value, max_idx = torch.max(out_prob, dim=1)
+                # max_std = out_std.gather(1, max_idx.view(-1,1))
+                # print(max_std.size())
 
-            u = torch.exp(-self.beta * max_std).unsqueeze(-1).unsqueeze(-1) + self.eps
-            # u_list.append(u.mean().item())
-            # std_list.append(max_std.mean().item())
+            u = torch.exp(-self.beta * prediction_entropy).unsqueeze(-1).unsqueeze(-1) + self.eps
+            u_list.append(u)
+            std_list.append(prediction_entropy)
             # u = torch.exp(-torch.exp(self.beta) * max_std + self.alpha).unsqueeze(-1).unsqueeze(-1)
             # print('u:', u)                
             c_prime = u * c_
             context_list.append(c_prime)
 
         
-        # u_mean = np.mean(u_list)
-        # std_mean = np.mean(std_list)
+        u_list, std_list = torch.stack(u_list), torch.stack(std_list)
+        
+        # u_list, std_list = u_list.permute((1, 0, 2, 3, 4)), std_list.permute((1, 0, 2, 3, 4))
+        u_list = u_list.squeeze()
+        std_list = std_list.squeeze()
+        # print("u_list:", u_list.size())
+        u_list, std_list = u_list.tolist(), std_list.tolist()
+        
         # print(f"u_mean: {u_mean:.4f}, std_mean: {std_mean:.4f}")
 
         context = torch.stack(context_list, dim=0) # support_size, meta_batch_size, self.n_context_channels, h, w
@@ -547,7 +555,7 @@ class ARM_UNC(ERM):
             for _ in range(T):
                 outputs.append(self.model(x))
 
-            return F.softmax(torch.stack(outputs, dim=0), dim=-1).mean(dim=0)
+            return F.softmax(torch.stack(outputs, dim=0), dim=-1).mean(dim=0), u_list, std_list
 
 
     def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
