@@ -24,6 +24,7 @@ def get_loader(dataset, sampler_type, uniform_over_groups=False,
         shuffle = None
         sampler=None
         drop_last = False
+
     else:
 
         batch_size = meta_batch_size * support_size
@@ -51,6 +52,9 @@ def get_loader(dataset, sampler_type, uniform_over_groups=False,
                 shuffle=True
             print("shuffle: ", shuffle)
 
+    if sampler_type == 'online':
+        batch_size = 1
+        
     loader = torch.utils.data.DataLoader(dataset,
                                   batch_size=batch_size,
                                   shuffle=shuffle,

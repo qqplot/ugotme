@@ -126,6 +126,7 @@ def main():
             args.ckpt_path = Path('output') / 'checkpoints' / ckpt_folder / f'best.pkl' # final_weights.pkl
             algorithm = torch.load(args.ckpt_path).to(args.device)
             algorithm.adapt_bn = args.adapt_bn
+            algorithm.zero_context = args.zero_context
             stats = test(args, algorithm, seed, eval_on=args.eval_on)
             score_keeper.log(stats)
 

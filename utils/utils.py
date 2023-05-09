@@ -47,7 +47,7 @@ def make_arm_train_parser():
     parser.add_argument('--scheduler', type=str, default='none', choices=['none', 'cosine', 'cosine_warm']) 
     parser.add_argument('--debug_unc', type=int, default=0)
     parser.add_argument('--zero_context', type=int, default=0)
-
+    parser.add_argument('--noise_level', type=float, default=0.1)
 
 
     return parser
@@ -93,7 +93,7 @@ def update_arm_parser(args):
 def add_common_args(parser):
 
     # Data sampling
-    parser.add_argument('--sampler', type=str, default='group', choices=['standard', 'group'], help='Standard or group sampler')
+    parser.add_argument('--sampler', type=str, default='group', choices=['standard', 'group', 'online'], help='Standard or group sampler')
     parser.add_argument('--uniform_over_groups', type=int, default=1, help='Sample across groups uniformly')
 
     # Train / test

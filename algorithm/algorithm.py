@@ -431,8 +431,11 @@ class ARM_UNC(ERM):
         self.zero_context = hparams['zero_context']
         
         self.eps = 1e-05
-        self.beta = torch.ones(1, device=device, requires_grad=bool(hparams['beta']))
-        # self.coef = torch.ones(1, device=device, requires_grad=bool(hparams['beta']))
+        # self.beta = torch.ones(1, device=device, requires_grad=bool(hparams['beta']))
+        self.beta = torch.zeros(1, device=device, requires_grad=bool(hparams['beta']))
+        c0 = torch.zeros(hparams['n_context_channels'], h, w, requires_grad=bool(hparams['beta']), device=device)
+        torch.nn.init.kaiming_uniform_(c0, nonlinearity='relu')
+        self.c0 = c0
 
         self.T = hparams['T']
         self.debug = hparams['debug']
@@ -441,6 +444,7 @@ class ARM_UNC(ERM):
 
         if bool(hparams['beta']):
             params.append(self.beta)
+            params.append(self.c0)
         
         if self.affine_on:
             params += list(self.context_norm.parameters())
@@ -479,7 +483,8 @@ class ARM_UNC(ERM):
         context_list = []
         u_list, std_list = [], []
         
-        c_prime = torch.zeros_like(context[0]) # Shape: meta_batch_size, n_context_channels, H, W
+        # c_prime = torch.zeros_like(context[0]) # Shape: meta_batch_size, n_context_channels, H, W
+        c_prime = self.c0.unsqueeze(0).expand(meta_batch_size, -1, -1, -1)
         for idx, (x_, c_) in enumerate(zip(x_reshape, context)):
             x_ = torch.cat([x_, c_prime], dim=1) # Shape: meta_batch_size, 2 * n_context_channels, H, W
 
@@ -493,17 +498,23 @@ class ARM_UNC(ERM):
                 out_prob = []         
                 for _ in range(T):
                     outputs = self.model(x_) # Shape : meta_batch_size, num_classes
-                    out_prob.append(F.softmax(outputs, dim=-1))
+                    out_prob.append(outputs)
                 out_prob = torch.stack(out_prob)
                 # out_std = torch.std(out_prob, dim=0)
                 out_prob = torch.mean(out_prob, dim=0)
-                prediction_entropy = torch.sum(-out_prob * torch.log(out_prob), dim=-1).unsqueeze(-1).detach()
-                # print(prediction_entropy.size())
+                out_prob = F.softmax(outputs, dim=-1)
+                # print(out_prob)
+                # print("out_prob", out_prob.size())
+                prediction_entropy = torch.sum(-out_prob * torch.log2(out_prob + 1e-30), dim=-1).unsqueeze(-1).detach()
+                # print(prediction_entropy)
                 # max_value, max_idx = torch.max(out_prob, dim=1)
                 # max_std = out_std.gather(1, max_idx.view(-1,1))
                 # print(max_std.size())
 
-            u = torch.exp(-self.beta * prediction_entropy).unsqueeze(-1).unsqueeze(-1) + self.eps
+            # u = torch.exp(-self.beta * prediction_entropy).unsqueeze(-1).unsqueeze(-1) + self.eps
+            # u = torch.exp(-prediction_entropy).unsqueeze(-1).unsqueeze(-1) + self.eps
+            u = torch.exp(-(self.eps + torch.exp(self.beta)) * prediction_entropy).unsqueeze(-1).unsqueeze(-1)
+
             u_list.append(u)
             std_list.append(prediction_entropy)
             # u = torch.exp(-torch.exp(self.beta) * max_std + self.alpha).unsqueeze(-1).unsqueeze(-1)
@@ -554,7 +565,7 @@ class ARM_UNC(ERM):
             outputs = []
             for _ in range(T):
                 outputs.append(self.model(x))
-
+            # print(std_list)
             return F.softmax(torch.stack(outputs, dim=0), dim=-1).mean(dim=0), u_list, std_list
 
 

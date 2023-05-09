@@ -12,6 +12,8 @@ import wandb
 import data
 import utils
 
+from skimage.util import random_noise
+from torchvision.utils import save_image
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = "TRUE"
 
@@ -24,6 +26,10 @@ def run_epoch(algorithm, loader, train, progress_bar=True, mask=None, mask_p=1.0
     epoch_labels = []
     epoch_logits = []
     epoch_group_ids = []
+    epoch_results = {
+        'epoch_u_list' : [],
+        'epoch_std_list' : [],
+    }
 
     if progress_bar:
         loader = tqdm(loader, desc=f'{"train" if train else "eval"} loop')
@@ -43,13 +49,22 @@ def run_epoch(algorithm, loader, train, progress_bar=True, mask=None, mask_p=1.0
             if logits is None: # DANN
                 continue
         else:
-            logits = algorithm.predict(images)
+            if algorithm.model.__class__.__name__ == 'ConvNetUNC' or algorithm.model.__class__.__name__ == 'ResNet_UNC':
+                logits, u_list, std_list = algorithm.predict(images)
+            else:
+                logits = algorithm.predict(images)
+                u_list, std_list = None, None
+            epoch_results['epoch_u_list'].append(u_list)
+            epoch_results['epoch_std_list'].append(std_list)
 
         epoch_labels.append(labels.to('cpu').clone().detach())
         epoch_logits.append(logits.to('cpu').clone().detach())
         epoch_group_ids.append(group_ids.to('cpu').clone().detach())
+        epoch_results['epoch_logits'] = epoch_logits
+        epoch_results['epoch_labels'] = epoch_labels
+        epoch_results['epoch_group_ids'] = epoch_group_ids
 
-    return torch.cat(epoch_logits), torch.cat(epoch_labels), torch.cat(epoch_group_ids), epoch_logits, epoch_labels, epoch_group_ids
+    return torch.cat(epoch_logits), torch.cat(epoch_labels), torch.cat(epoch_group_ids), epoch_results
 
 def train(args):
 
@@ -58,6 +73,7 @@ def train(args):
     args.n_groups = train_loader.dataset.n_groups
 
     algorithm = utils.init_algorithm(args) 
+
     print('Args', '-'*50, '\n', args, '\n', '-'*50)
 
     # algorithm = init_algorithm(args, train_loader.dataset)
@@ -74,7 +90,7 @@ def train(args):
         scheduler = CosineAnnealingWarmRestarts(optimizer=algorithm.optimizer, T_0=10, T_mult=1, eta_min=0.00001)
 
     for epoch in trange(args.num_epochs):
-        _, _, _, epoch_logits, epoch_labels, epoch_group_ids = run_epoch(algorithm, train_loader, train=True, progress_bar=args.progress_bar, mask=args.mask, mask_p=args.mask_p)
+        _, _, _, epoch_results = run_epoch(algorithm, train_loader, train=True, progress_bar=args.progress_bar, mask=args.mask, mask_p=args.mask_p)
         
         if args.scheduler != 'none':
             scheduler.step()
@@ -82,6 +98,7 @@ def train(args):
         print(f"Epoch {epoch} - lr: {algorithm.optimizer.param_groups[0]['lr'] : .6f}", end='  ')
         if args.algorithm in ['ARM-UNC', 'ARM-CONF']:
             print(f"beta: {algorithm.beta.item():.4f}", end='  ')
+            print(algorithm.c0[0][0][0])
         print()
         if epoch % args.epochs_per_eval == 0:
             stats = eval_groupwise(args, algorithm, val_loader, epoch, split='val', n_samples_per_group=args.n_samples_per_group)
@@ -151,16 +168,30 @@ def get_group_iterator_noisy(args, loader, group, support_size, n_samples_per_gr
         print(f"num_noise is {args.num_noise} and support_size is {support_size}!!!")
         num_noise = support_size
 
+    normal_iter = 10
+    noise_iter = 3
+    normal_count, noise_count = 0, 0
     for i, (idx, idx_not_group) in enumerate(zip(example_ids, example_ids_not_group)):
         x, y, g = loader.dataset[idx]
         x_noise, y_noise, g_noise = loader.dataset[idx_not_group]     
 
-        if (i + 1) % num_noise == 0:
-            X.append(x_noise); Y.append(y_noise); G.append(g_noise)
-        else:
+        if normal_count < normal_iter:
+            normal_count += 1            
             X.append(x); Y.append(y); G.append(g)
+        else:
+            if noise_count < noise_iter:
+                noise_count += 1
+                x_noise = x.clone() 
+                x_noise = torch.tensor(random_noise(x_noise, mode='salt', amount=args.noise_level))
+                name = 'mnist' + str(g) + str(y) + '.png'
+                # save_noisy_image(x_noise, name)
+                X.append(x_noise); Y.append(y); G.append(g)
+            else:
+                normal_count, noise_count = 1, 0
+                X.append(x); Y.append(y); G.append(g)
        
         if (i + 1) % support_size == 0:
+            normal_count, noise_count = 0, 0
             X, Y, G = torch.stack(X), torch.tensor(Y, dtype=torch.long), torch.tensor(G, dtype=torch.long)
             batches.append((X, Y, G))
             X, Y, G = [], [], []
@@ -182,6 +213,8 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
     accuracies = np.zeros(len(loader.dataset.groups))
     num_examples = np.zeros(len(loader.dataset.groups))
     online_accuracies = []
+    online_weights = []
+    online_stds = []
 
     if args.adapt_bn:
         algorithm.train()
@@ -197,7 +230,11 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
         else:
             group_iterator = get_group_iterator(loader, group, args.support_size, n_samples_per_group)
 
-        probs, labels, group_ids, epoch_logits, epoch_labels, epoch_group_ids = run_epoch(algorithm, group_iterator, train=False, progress_bar=False)
+        probs, labels, group_ids, epoch_results = run_epoch(algorithm, group_iterator, train=False, progress_bar=False)
+        epoch_logits = epoch_results['epoch_logits']
+        epoch_labels = epoch_results['epoch_labels']
+        epoch_u_list, epoch_std_list = epoch_results['epoch_u_list'], epoch_results['epoch_std_list']
+
         preds = np.argmax(probs, axis=1)
 
         # Evaluate
@@ -207,6 +244,8 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
                 preds_online = np.argmax(logits, axis=1)
                 label = epoch_labels[i]
                 online_accuracies.append((preds_online == label).numpy().astype(int)) 
+                online_weights.append(epoch_u_list[i])
+                online_stds.append(epoch_std_list[i])
                        
         accuracy = np.mean((preds == labels).numpy())
         num_examples[group] = len(labels)
@@ -237,7 +276,9 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
                 f'{split}/average_acc': average_case_acc,
                 f'{split}/total_size': total_size,
                 f'{split}/empirical_acc': empirical_case_acc,
-                f'{split}/online_acc': online_accuracies
+                f'{split}/online_acc': online_accuracies,
+                f'{split}/weights': online_weights,
+                f'{split}/standard_errors': online_stds,
             }
 
     if epoch is not None:
@@ -248,3 +289,11 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
 
     return stats
 
+
+def save_noisy_image(img, name):
+    if img.size(1) == 3:
+        img = img.view(img.size(0), 3, 32, 32)
+        save_image(img, name)
+    else:
+        img = img.view(img.size(0), 1, 28, 28)
+        save_image(img, name)
