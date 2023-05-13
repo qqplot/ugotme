@@ -518,6 +518,7 @@ class ARM_UNC(ERM):
         ent_list = torch.stack(ent_list, dim=0).squeeze().tolist()
 
         # reshape context list (meta_batch_size, support_size, self.n_context_channels, h, w)
+        self.last_ctx = ctx_list[-1] # support_size, self.n_context_channels, h, w
         ctx_list = torch.stack(ctx_list[:-1], dim=0).transpose(0, 1)
 
         # reshape input / context (meta_batch_size * support_size, self.n_context_channels, h, w)
