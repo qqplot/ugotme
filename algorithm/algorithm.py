@@ -478,7 +478,7 @@ class ARM_UNC(ERM):
         ctx = ctx.reshape(meta_batch_size, support_size, self.n_context_channels, h, w)
 
         # accumulate context by cumsum (meta_batch_size, support_size, self.n_context_channels, h, w)
-        ctx = ctx.cumsum(dim=1)
+        # ctx = ctx.cumsum(dim=1)
 
         # normalize context (meta_batch_size, support_size, self.n_context_channels, h, w)
         ctx = self.context_norm(ctx)
@@ -515,7 +515,7 @@ class ARM_UNC(ERM):
 
             u_list.append(u)
             ent_list.append(entropy)
-            ctx_list.append(u.reshape(-1, 1, 1, 1) * ctx_t)
+            ctx_list.append(u.reshape(-1, 1, 1, 1) * ctx_t + ctx_list[-1])
 
         # stack results
         u_list = torch.stack(u_list, dim=0).squeeze().tolist()
@@ -527,6 +527,9 @@ class ARM_UNC(ERM):
         # reshape input / context (meta_batch_size * support_size, self.n_context_channels, h, w)
         ctx_list = ctx_list.reshape(-1, self.n_context_channels, h, w)
         x = x.reshape(-1, c, h, w)
+
+        # normalize context (meta_batch_size, support_size, self.n_context_channels, h, w)
+        ctx = self.context_norm(ctx)
 
         # do prediction based on context
         x_ctx = torch.cat([x, ctx_list], dim=1)
