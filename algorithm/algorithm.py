@@ -487,11 +487,8 @@ class ARM_UNC(ERM):
         # for each input data
         for idx, (x_t, ctx_t) in enumerate(zip(x.transpose(0, 1), ctx.transpose(0, 1))):
 
-            # normalize context (meta_batch_size, support_size, self.n_context_channels, h, w)
-            ctx = self.context_norm(ctx_t)
-
             # get current input and prev_ctx
-            x_ctx_t = torch.cat([x_t, ctx_list[-1]], dim=1)
+            x_ctx_t = torch.cat([x_t, self.context_norm(ctx_list[-1])], dim=1)
 
             # compute uncertainty
             with torch.no_grad():     
@@ -526,7 +523,7 @@ class ARM_UNC(ERM):
         x = x.reshape(-1, c, h, w)
 
         # do prediction based on context
-        x_ctx = torch.cat([x, ctx_list], dim=1)
+        x_ctx = torch.cat([x, self.context_norm(ctx_list)], dim=1)
         if train:
             self.model.train()
             return self.model(x_ctx)
