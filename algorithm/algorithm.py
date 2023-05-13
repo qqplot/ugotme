@@ -477,12 +477,6 @@ class ARM_UNC(ERM):
         x = x.reshape(meta_batch_size, support_size, c, h, w)
         ctx = ctx.reshape(meta_batch_size, support_size, self.n_context_channels, h, w)
 
-        # accumulate context by cumsum (meta_batch_size, support_size, self.n_context_channels, h, w)
-        # ctx = ctx.cumsum(dim=1)
-
-        # normalize context (meta_batch_size, support_size, self.n_context_channels, h, w)
-        ctx = self.context_norm(ctx)
-
         # accumulate ctx by uncertainty weights
         u_list, ent_list = [], []
         if self.cxt_self_include:
@@ -492,6 +486,10 @@ class ARM_UNC(ERM):
 
         # for each input data
         for idx, (x_t, ctx_t) in enumerate(zip(x.transpose(0, 1), ctx.transpose(0, 1))):
+
+            # normalize context (meta_batch_size, support_size, self.n_context_channels, h, w)
+            ctx = self.context_norm(ctx_t)
+
             # get current input and prev_ctx
             x_ctx_t = torch.cat([x_t, ctx_list[-1]], dim=1)
 
@@ -503,10 +501,8 @@ class ARM_UNC(ERM):
 
             out_prob = F.softmax(torch.stack(out_prob, dim=0) / (self.tau + self.eps), dim=-1)
             if self.bald:
-                # entropy = self.get_BALD_acquisition(torch.stack(out_prob, dim=0))
                 entropy = self.get_BALD_acquisition(out_prob)
             else:                
-                # out_prob = torch.mean(torch.stack(out_prob, dim=0), dim=0)
                 out_prob = torch.mean(out_prob, dim=0)
                 entropy = torch.sum(-out_prob * torch.log2(out_prob + self.eps), dim=-1)
 
@@ -527,9 +523,6 @@ class ARM_UNC(ERM):
         # reshape input / context (meta_batch_size * support_size, self.n_context_channels, h, w)
         ctx_list = ctx_list.reshape(-1, self.n_context_channels, h, w)
         x = x.reshape(-1, c, h, w)
-
-        # normalize context (meta_batch_size, support_size, self.n_context_channels, h, w)
-        ctx = self.context_norm(ctx)
 
         # do prediction based on context
         x_ctx = torch.cat([x, ctx_list], dim=1)
