@@ -415,6 +415,155 @@ class ARM_UNC(ERM):
         self.context_net = context_net
         self.affine_on = hparams['affine_on']
         self.n_context_channels = hparams['n_context_channels']
+        _, h, w = hparams['input_shape']
+        self.context_norm = nn.LayerNorm((hparams['n_context_channels'], h, w), elementwise_affine=bool(self.affine_on), device=device)
+
+        self.support_size = hparams['support_size']
+        self.eps = 1e-10
+        self.beta = torch.zeros(1, requires_grad=True, device=device)
+        self.tau = torch.ones(1, requires_grad=True, device=device)
+        self.bald = hparams['bald']
+        self.zero_init = hparams['zero_init']
+        if self.zero_init:
+            self.context_init = torch.zeros(1, hparams['n_context_channels'], hparams['input_shape'][-2], hparams['input_shape'][-1], requires_grad=True, device=device)
+        else:
+            context_init = np.random.randn(1, hparams['n_context_channels'], hparams['input_shape'][-2], hparams['input_shape'][-1]) * np.sqrt(2.0/hparams['n_context_channels'])
+            self.context_init = torch.tensor(context_init, requires_grad=True, device=device, dtype=torch.float)
+
+        self.T = hparams['T']
+        self.debug = hparams['debug']
+        self.cxt_self_include = hparams['cxt_self_include']
+      
+        params = list(self.model.parameters())
+        params += list(self.context_net.parameters())
+        params += list(self.context_norm.parameters())
+        params.append(self.beta)
+        params.append(self.tau)
+        params.append(self.context_init)
+        self.init_optimizers(params)
+
+    def get_BALD_acquisition(self, y_T):
+
+        expected_entropy = - torch.mean(torch.sum(y_T * torch.log(y_T + self.eps), dim=-1), dim=0) 
+        expected_p = torch.mean(y_T, dim=0)
+        entropy_expected_p = - torch.sum(expected_p * torch.log(expected_p + self.eps), dim=-1)
+        return (entropy_expected_p - expected_entropy)
+
+    def predict(self, x, train=False):
+        # get current input size
+        batch_size, c, h, w = x.shape
+
+        # get number of groups and support size
+        if batch_size % self.support_size == 0:
+            meta_batch_size, support_size = batch_size // self.support_size, self.support_size
+        else:
+            meta_batch_size, support_size = 1, batch_size
+
+        # set training mode
+        if train:
+            # set all modules training mode
+            self.train()
+            enable_dropout(self.model)
+        else:
+            # set all module eval
+            self.eval()
+            # but turn on dropout
+            enable_dropout(self.model)
+
+        # compute sample-wise context (batch_size, channels, H, W)
+        ctx = self.context_net(x)        
+
+        # reshape x and ctx
+        x = x.reshape(meta_batch_size, support_size, c, h, w)
+        ctx = ctx.reshape(meta_batch_size, support_size, self.n_context_channels, h, w)
+
+        # accumulate context by cumsum (meta_batch_size, support_size, self.n_context_channels, h, w)
+        ctx = ctx.cumsum(dim=1)
+
+        # normalize context (meta_batch_size, support_size, self.n_context_channels, h, w)
+        ctx = self.context_norm(ctx)
+
+        # accumulate ctx by uncertainty weights
+        u_list, ent_list = [], []
+        if self.cxt_self_include:
+            ctx_list = [ctx.transpose(0, 1)[0]]
+        else:
+            ctx_list = [self.context_init.expand(meta_batch_size, -1, -1, -1)]
+
+        # for each input data
+        for idx, (x_t, ctx_t) in enumerate(zip(x.transpose(0, 1), ctx.transpose(0, 1))):
+            # get current input and prev_ctx
+            x_ctx_t = torch.cat([x_t, ctx_list[-1]], dim=1)
+
+            # compute uncertainty
+            with torch.no_grad():     
+                out_prob = []
+                for _ in range(self.T):
+                    out_prob.append(self.model(x_ctx_t))
+
+            out_prob = F.softmax(torch.stack(out_prob, dim=0) / (self.tau + self.eps), dim=-1)
+            if self.bald:
+                # entropy = self.get_BALD_acquisition(torch.stack(out_prob, dim=0))
+                entropy = self.get_BALD_acquisition(out_prob)
+            else:                
+                # out_prob = torch.mean(torch.stack(out_prob, dim=0), dim=0)
+                out_prob = torch.mean(out_prob, dim=0)
+                entropy = torch.sum(-out_prob * torch.log2(out_prob + self.eps), dim=-1)
+
+            u = torch.exp(-torch.exp(self.beta) * entropy)
+            # u = torch.exp(-F.softplus(self.beta) * entropy)
+
+            u_list.append(u)
+            ent_list.append(entropy)
+            ctx_list.append(u.reshape(-1, 1, 1, 1) * ctx_t)
+
+        # stack results
+        u_list = torch.stack(u_list, dim=0).squeeze().tolist()
+        ent_list = torch.stack(ent_list, dim=0).squeeze().tolist()
+
+        # reshape context list (meta_batch_size, support_size, self.n_context_channels, h, w)
+        ctx_list = torch.stack(ctx_list[:-1], dim=0).transpose(0, 1)
+
+        # reshape input / context (meta_batch_size * support_size, self.n_context_channels, h, w)
+        ctx_list = ctx_list.reshape(-1, self.n_context_channels, h, w)
+        x = x.reshape(-1, c, h, w)
+
+        # do prediction based on context
+        x_ctx = torch.cat([x, ctx_list], dim=1)
+        if train:
+            self.model.train()
+            return self.model(x_ctx)
+        else:
+            out_prob = []
+            for _ in range(self.T):
+                out_prob.append(F.softmax(self.model(x_ctx), dim=-1))
+            return torch.stack(out_prob, dim=0).mean(dim=0), u_list, ent_list
+
+    def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
+        self.train()
+        # Forward
+        logits = self.predict(images, train=True)
+        # Apply the mask
+        if mask:
+            random_mask = torch.randn(len(labels)).float().ge(mask_p).float().to(self.device)
+            loss = self.loss_fn(logits, labels) * random_mask
+            loss = torch.sum(loss) / torch.sum(random_mask)
+        else:
+            loss = self.loss_fn(logits, labels)
+
+        self.update(loss)
+        stats = { 'objective': loss.detach().item(), }
+        return logits, stats
+
+
+class ARM_UNC_(ERM):
+
+    def __init__(self, model, loss_fn, device, context_net, hparams={}):
+        super().__init__(model, loss_fn, device, hparams)
+
+        self.context_net = context_net
+        self.affine_on = hparams['affine_on']
+        self.n_context_channels = hparams['n_context_channels']
         self.context_norm = None
         if hparams['norm_type'] == 'layer':
             _, h, w = hparams['input_shape']
