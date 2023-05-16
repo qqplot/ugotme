@@ -360,13 +360,11 @@ class ResNet_UNC(nn.Module):
                 for i in range(num_channels):
                     self.model.conv1.weight.data[:, i, :, :] = old_weights[:, i % 3, :, :]
 
-        if avgpool:
-            self.model.avgpool = nn.AdaptiveAvgPool2d(1)
 
-        self.model.layer1.dropout = nn.Dropout(p=dropout_rate)
-        self.model.layer2.dropout = nn.Dropout(p=dropout_rate)
-        self.model.layer3.dropout = nn.Dropout(p=dropout_rate)
-        self.model.layer4.dropout = nn.Dropout(p=dropout_rate)
+        self.model.layer1 = nn.Sequential(self.model.layer1, nn.Dropout(p=dropout_rate))
+        self.model.layer2 = nn.Sequential(self.model.layer2, nn.Dropout(p=dropout_rate))
+        self.model.layer3 = nn.Sequential(self.model.layer3, nn.Dropout(p=dropout_rate))
+        self.model.layer4 = nn.Sequential(self.model.layer4, nn.Dropout(p=dropout_rate))
 
         for name, module in self.model.named_modules():
             print(name)

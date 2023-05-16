@@ -270,7 +270,7 @@ class ARM_CML(ERM):
             else:
                 x = torch.cat([x, context], dim=1)
 
-            if self.model.training is False and self.model.__class__.__name__ == 'ConvNetUNC':
+            if self.model.training is False and self.model.__class__.__name__[-3:] == 'UNC':
                 self.model.eval()
                 enable_dropout(self.model)
                 outputs = []
@@ -374,7 +374,7 @@ class ARM_CUSUM(ERM):
         # context = context.reshape((meta_batch_size * support_size, self.n_context_channels, h, w)) # meta_batch_size * support_size, context_size          
         # x = torch.cat([x, context], dim=1)
 
-        if self.model.training is False and self.model.__class__.__name__ == 'ConvNetUNC':
+        if self.model.training is False and self.model.__class__.__name__[-3:] == 'UNC':
             self.model.eval()
             enable_dropout(self.model)
             outputs = []
@@ -424,6 +424,7 @@ class ARM_UNC(ERM):
         self.tau = torch.ones(1, requires_grad=True, device=device)
         self.bald = hparams['bald']
         self.zero_init = hparams['zero_init']
+
         if self.zero_init:
             self.context_init = torch.zeros(1, hparams['n_context_channels'], hparams['input_shape'][-2], hparams['input_shape'][-1], requires_grad=True, device=device)
         else:
@@ -437,9 +438,11 @@ class ARM_UNC(ERM):
         params = list(self.model.parameters())
         params += list(self.context_net.parameters())
         params += list(self.context_norm.parameters())
+        # params += list(self.context_init)
+        params.append(self.context_init)
         params.append(self.beta)
         params.append(self.tau)
-        params.append(self.context_init)
+
         self.init_optimizers(params)
 
     def get_BALD_acquisition(self, y_T):
@@ -483,7 +486,7 @@ class ARM_UNC(ERM):
             ctx_list = [ctx.transpose(0, 1)[0]]
         else:
             ctx_list = [self.context_init.expand(meta_batch_size, -1, -1, -1)]
-
+        
         # for each input data
         for idx, (x_t, ctx_t) in enumerate(zip(x.transpose(0, 1), ctx.transpose(0, 1))):
 
@@ -526,11 +529,11 @@ class ARM_UNC(ERM):
         x_ctx = torch.cat([x, self.context_norm(ctx_list)], dim=1)
         if train:
             self.model.train()
-            return self.model(x_ctx)
+            return self.model(x_ctx) / (self.tau + self.eps)
         else:
             out_prob = []
             for _ in range(self.T):
-                out_prob.append(F.softmax(self.model(x_ctx), dim=-1))
+                out_prob.append(F.softmax(self.model(x_ctx) / (self.tau + self.eps), dim=-1))
             return torch.stack(out_prob, dim=0).mean(dim=0), u_list, ent_list
 
     def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
