@@ -421,9 +421,10 @@ class ARM_UNC(ERM):
         self.support_size = hparams['support_size']
         self.eps = 1e-10
         self.beta = torch.zeros(1, requires_grad=True, device=device)
-        self.tau = torch.ones(1, requires_grad=True, device=device)
+        self.tau = torch.zeros(1, requires_grad=True, device=device)
         self.bald = hparams['bald']
         self.zero_init = hparams['zero_init']
+        self.zero_context = hparams['zero_context']
 
         if self.zero_init:
             self.context_init = torch.zeros(1, hparams['n_context_channels'], hparams['input_shape'][-2], hparams['input_shape'][-1], requires_grad=True, device=device)
@@ -491,15 +492,22 @@ class ARM_UNC(ERM):
         for idx, (x_t, ctx_t) in enumerate(zip(x.transpose(0, 1), ctx.transpose(0, 1))):
 
             # get current input and prev_ctx
+            if self.zero_context:      
+                u = torch.ones(1)
+                u_list.append(u.reshape(-1, 1, 1, 1))
+                ent_list.append(u.reshape(-1, 1, 1, 1))
+                ctx_list.append(ctx_list[0])
+                continue
+
             x_ctx_t = torch.cat([x_t, self.context_norm(ctx_list[-1])], dim=1)
 
             # compute uncertainty
             with torch.no_grad():     
                 out_prob = []
                 for _ in range(self.T):
-                    out_prob.append(self.model(x_ctx_t))
+                    out_prob.append(self.model(x_ctx_t) * torch.exp(self.tau))
 
-            out_prob = F.softmax(torch.stack(out_prob, dim=0) / (self.tau + self.eps), dim=-1)
+            out_prob = F.softmax(torch.stack(out_prob, dim=0), dim=-1)
             if self.bald:
                 entropy = self.get_BALD_acquisition(out_prob)
             else:                
@@ -528,12 +536,12 @@ class ARM_UNC(ERM):
         # do prediction based on context
         x_ctx = torch.cat([x, self.context_norm(ctx_list)], dim=1)
         if train:
-            self.model.train()
-            return self.model(x_ctx) / (self.tau + self.eps)
+            self.train()
+            return self.model(x_ctx)  * torch.exp(self.tau)
         else:
             out_prob = []
             for _ in range(self.T):
-                out_prob.append(F.softmax(self.model(x_ctx) / (self.tau + self.eps), dim=-1))
+                out_prob.append(F.softmax(self.model(x_ctx) * torch.exp(self.tau), dim=-1))
             return torch.stack(out_prob, dim=0).mean(dim=0), u_list, ent_list
 
     def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
@@ -552,185 +560,6 @@ class ARM_UNC(ERM):
         stats = { 'objective': loss.detach().item(), }
         return logits, stats
 
-
-class ARM_UNC_(ERM):
-
-    def __init__(self, model, loss_fn, device, context_net, hparams={}):
-        super().__init__(model, loss_fn, device, hparams)
-
-        self.context_net = context_net
-        self.affine_on = hparams['affine_on']
-        self.n_context_channels = hparams['n_context_channels']
-        self.context_norm = None
-        if hparams['norm_type'] == 'layer':
-            _, h, w = hparams['input_shape']
-            self.context_norm = nn.LayerNorm((hparams['n_context_channels'], h, w),
-                                             elementwise_affine=bool(self.affine_on),
-                                             device=device
-                                             )
-        elif hparams['norm_type'] == 'instance':
-            self.context_norm = nn.InstanceNorm3d(hparams['n_context_channels'], 
-                                                  affine=False,
-                                                  device=device)                    
-        self.support_size = hparams['support_size']
-        self.normalize = hparams['normalize']
-        self.zero_context = hparams['zero_context']
-        
-        self.eps = 1e-05
-        # self.beta = torch.ones(1, device=device, requires_grad=bool(hparams['beta']))
-        self.beta = torch.zeros(1, device=device, requires_grad=bool(hparams['beta']))
-        c0 = torch.zeros(hparams['n_context_channels'], h, w, requires_grad=bool(hparams['beta']), device=device)
-        torch.nn.init.kaiming_uniform_(c0, nonlinearity='relu')
-        self.c0 = c0
-
-        self.T = hparams['T']
-        self.debug = hparams['debug']
-      
-        params = list(self.model.parameters()) + list(self.context_net.parameters())
-
-        if bool(hparams['beta']):
-            params.append(self.beta)
-            params.append(self.c0)
-        
-        if self.affine_on:
-            params += list(self.context_norm.parameters())
-
-        self.init_optimizers(params)
-
-    def predict(self, x, train=False):
-        batch_size, c, h, w = x.shape
-
-        if batch_size % self.support_size == 0:
-            meta_batch_size, support_size = batch_size // self.support_size, self.support_size
-        else:
-            meta_batch_size, support_size = 1, batch_size
-        
-        enable_dropout(self.model)
-            
-        context = self.context_net(x) # Shape: batch_size, channels, H, W
-        if self.zero_context:
-            zero_context = context.clone()
-            tmp = []
-            for i, c_ in enumerate(zero_context):
-                if i > 0 and (i+1) % 5 == 0:
-                    tmp.append(torch.zeros_like(c_))
-                    continue
-                tmp.append(c_)
-            zero_context = torch.stack(tmp).to(self.device)
-            context = zero_context
-
-
-        x_reshape = x.reshape((meta_batch_size, support_size, c, h, w))
-        x_reshape = x_reshape.permute((1, 0, 2, 3, 4))
-        context = context.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
-        context = context.permute((1, 0, 2, 3, 4))
-    
-        T = self.T
-        context_list = []
-        u_list, std_list = [], []
-        
-        # c_prime = torch.zeros_like(context[0]) # Shape: meta_batch_size, n_context_channels, H, W
-        c_prime = self.c0.unsqueeze(0).expand(meta_batch_size, -1, -1, -1)
-        for idx, (x_, c_) in enumerate(zip(x_reshape, context)):
-            x_ = torch.cat([x_, c_prime], dim=1) # Shape: meta_batch_size, 2 * n_context_channels, H, W
-
-            if self.debug:
-                u = 1   
-                c_prime = c_prime + u * c_
-                context_list.append(c_prime)
-                continue
-
-            with torch.no_grad():     
-                out_prob = []         
-                for _ in range(T):
-                    outputs = self.model(x_) # Shape : meta_batch_size, num_classes
-                    out_prob.append(outputs)
-                out_prob = torch.stack(out_prob)
-                # out_std = torch.std(out_prob, dim=0)
-                out_prob = torch.mean(out_prob, dim=0)
-                out_prob = F.softmax(outputs, dim=-1)
-                # print(out_prob)
-                # print("out_prob", out_prob.size())
-                prediction_entropy = torch.sum(-out_prob * torch.log2(out_prob + 1e-30), dim=-1).unsqueeze(-1).detach()
-                # print(prediction_entropy)
-                # max_value, max_idx = torch.max(out_prob, dim=1)
-                # max_std = out_std.gather(1, max_idx.view(-1,1))
-                # print(max_std.size())
-
-            # u = torch.exp(-self.beta * prediction_entropy).unsqueeze(-1).unsqueeze(-1) + self.eps
-            # u = torch.exp(-prediction_entropy).unsqueeze(-1).unsqueeze(-1) + self.eps
-            u = torch.exp(-(self.eps + torch.exp(self.beta)) * prediction_entropy).unsqueeze(-1).unsqueeze(-1)
-
-            u_list.append(u)
-            std_list.append(prediction_entropy)
-            # u = torch.exp(-torch.exp(self.beta) * max_std + self.alpha).unsqueeze(-1).unsqueeze(-1)
-            # print('u:', u)                
-            c_prime = u * c_
-            context_list.append(c_prime)
-
-        
-        u_list, std_list = torch.stack(u_list), torch.stack(std_list)
-        
-        # u_list, std_list = u_list.permute((1, 0, 2, 3, 4)), std_list.permute((1, 0, 2, 3, 4))
-        u_list = u_list.squeeze()
-        std_list = std_list.squeeze()
-        # print("u_list:", u_list.size())
-        u_list, std_list = u_list.tolist(), std_list.tolist()
-        
-        # print(f"u_mean: {u_mean:.4f}, std_mean: {std_mean:.4f}")
-
-        context = torch.stack(context_list, dim=0) # support_size, meta_batch_size, self.n_context_channels, h, w
-        context = context.permute((1, 0, 2, 3, 4)) # meta_batch_size, support_size, self.n_context_channels, h, w
-
-        context_fwd = context.cumsum(dim=1)
-        context_bwd = torch.flip(torch.flip(context, [1]).cumsum(dim=1), [1])
-
-        if self.context_norm is not None:
-            context_fwd = self.context_norm(context_fwd)
-            context_bwd = self.context_norm(context_bwd)
-        else:
-            length_tensor = torch.arange(1, support_size + 1).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(self.device)
-            context_fwd = torch.div(context_fwd, length_tensor.detach())
-            context_bwd = torch.div(context_bwd, length_tensor.detach())
-
-        context_fwd = context_fwd.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  # meta_batch_size * support_size, context_size
-        context_bwd = context_bwd.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  # meta_batch_size * support_size, context_size
-
-        x = x_reshape.permute((1, 0, 2, 3, 4))
-        x = x.reshape((meta_batch_size * support_size, c, h, w))
-
-        if train:
-            self.train(); self.model.train()
-            x_fwd = torch.cat([x, context_fwd], dim=1)
-            x_bwd = torch.cat([x, context_bwd], dim=1)
-            x = torch.concat([x_fwd, x_bwd], dim=0)
-            return self.model(x)
-        else: # Test time            
-            context = context_fwd
-            x = torch.cat([x, context], dim=1)
-            outputs = []
-            for _ in range(T):
-                outputs.append(self.model(x))
-            # print(std_list)
-            return F.softmax(torch.stack(outputs, dim=0), dim=-1).mean(dim=0), u_list, std_list
-
-
-    def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
-        
-        self.train()
-        # Forward
-        logits = self.predict(images, train=True) # batch * 2, num_class
-        # Apply the mask
-        if mask:
-            random_mask = torch.randn(len(labels)).float().ge(mask_p).float().to(self.device)
-            loss = self.loss_fn(logits, labels) * random_mask
-            loss = torch.sum(loss) / torch.sum(random_mask)
-        else:
-            loss = self.loss_fn(logits, torch.concat([labels, labels], dim=0))
-
-        self.update(loss)
-        stats = { 'objective': loss.detach().item(), }
-        return logits, stats
 
 
 class ARM_CONF(ERM):
