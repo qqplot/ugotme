@@ -334,6 +334,9 @@ class ARM_CUSUM(ERM):
         # reshape ctx
         ctx = ctx.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
 
+        # normalize
+        ctx = self.context_norm(ctx)
+
         # accumulate ctx (meta_batch_size, support_size, channels, h, w)
         ctx = ctx.cumsum(dim=1)
 
