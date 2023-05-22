@@ -319,6 +319,77 @@ class ARM_CUSUM(ERM):
 
 
     def predict(self, x):
+        # get current input size
+        batch_size, c, h, w = x.shape
+
+        # get number of groups and support size
+        if batch_size % self.support_size == 0:
+            meta_batch_size, support_size = batch_size // self.support_size, self.support_size
+        else:
+            meta_batch_size, support_size = 1, batch_size
+            
+        # compute sample-wise context (batch_size, channels, H, W)
+        ctx = self.context_net(x)
+
+        # reshape ctx
+        ctx = ctx.reshape((meta_batch_size, support_size, self.n_context_channels, h, w))
+
+        # normalize
+        ctx = self.context_norm(ctx)
+
+        # accumulate ctx (meta_batch_size, support_size, channels, h, w)
+        ctx = ctx.cumsum(dim=1)
+
+        # normalize
+        ctx = self.context_norm(ctx)
+
+        # reshape ctx (meta_batch_size * support_size, channels, h, w)
+        ctx = ctx.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  
+
+        # do prediction based on context
+        x = torch.cat([x, ctx], dim=1)
+        return self.model(x)
+
+
+
+class ARM_CUSUM_(ERM):
+
+    def __init__(self, model, loss_fn, device, context_net, hparams={}):
+        super().__init__(model, loss_fn, device, hparams)
+
+        self.context_net = context_net      
+        self.adapt_bn = hparams['adapt_bn']
+        self.affine_on = hparams['affine_on']
+        self.T = hparams['T']
+        self.beta = nn.Parameter(torch.tensor(hparams['beta']), requires_grad=True)
+
+        self.context_norm = None
+        if hparams['norm_type'] == 'layer':
+            _, h, w = hparams['input_shape']
+            self.context_norm = nn.LayerNorm((hparams['n_context_channels'], h, w),
+                                             elementwise_affine=bool(self.affine_on),
+                                             device=device
+                                             )
+        elif hparams['norm_type'] == 'instance':
+            self.context_norm = nn.InstanceNorm3d(hparams['n_context_channels'], 
+                                                  affine=False,
+                                                  device=device)
+            
+        self.support_size = hparams['support_size']
+        self.n_context_channels = hparams['n_context_channels']
+        self.normalize = hparams['normalize']
+        self.norm_type = hparams['norm_type']
+        self.input_shape = hparams['input_shape']
+        self.zero_context = hparams['zero_context']
+
+        params = list(self.model.parameters()) + list(self.context_net.parameters())
+        if self.affine_on:
+            params += list(self.context_norm.parameters())
+
+        self.init_optimizers(params)
+
+
+    def predict(self, x):
         batch_size, c, h, w = x.shape
 
         if batch_size % self.support_size == 0:
