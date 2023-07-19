@@ -5,8 +5,10 @@ from .static_mnist_unknown import StaticMNISTUnknown
 from .tinyimagenet_dataset import ImageNetDataset
 from .cifar_dataset import CIFARDataset
 from .femnist_dataset import FEMNISTDataset
+from .cifar_dataset_adapt import CIFARDatasetAdapt
 from . import static_mnist_unknown
 from .samplers import GroupSampler
+import torchvision
 
 def get_loader(dataset, sampler_type, uniform_over_groups=False,
                meta_batch_size=None,support_size=None, shuffle=True,
@@ -52,9 +54,6 @@ def get_loader(dataset, sampler_type, uniform_over_groups=False,
                 shuffle=True
             print("shuffle: ", shuffle)
 
-    if sampler_type == 'online':
-        batch_size = 1
-        
     loader = torch.utils.data.DataLoader(dataset,
                                   batch_size=batch_size,
                                   shuffle=shuffle,
@@ -88,6 +87,11 @@ def get_dataset(args, only_train=False):
         train_dataset = StaticMNISTUnknown(train, 'train', args)
         val_dataset = StaticMNISTUnknown(val, 'val', args)
         test_dataset = StaticMNISTUnknown(test, 'test', args)
+
+    elif args.dataset == 'cifar':
+        train_dataset = CIFARDatasetAdapt('train', args.data_dir)
+        val_dataset = CIFARDatasetAdapt('val', args.data_dir)
+        test_dataset = CIFARDatasetAdapt('test', args.data_dir)
 
     if only_train:
         return train_dataset

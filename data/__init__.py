@@ -5,4 +5,5 @@
 
 from . import femnist_dataset
 from . import cifar_dataset
+from . import cifar_dataset_adapt
 from .loader import get_loaders

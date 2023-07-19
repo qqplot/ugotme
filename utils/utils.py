@@ -1,5 +1,6 @@
 import argparse
 from algorithm.models import ContextNet, ConvNet, ResNet, ConvNetUNC, MLP, ContextNetEx, ResNetContext, ResNet_UNC
+from algorithm.ResNet import ResNet18, ResNet18UNC
 from algorithm.algorithm import ERM, DRNN, MMD, ARM_LL, DANN, ARM_BN, ARM_CML, ARM_CUSUM, ARM_UNC, ARM_CONF
 import torch
 from torch import nn
@@ -22,7 +23,7 @@ def make_arm_train_parser():
     add_model_args(parser)
 
     # Data args
-    parser.add_argument('--dataset', type=str, default='mnist', choices=['mnist', 'femnist', 'cifar-c', 'tinyimg'])
+    parser.add_argument('--dataset', type=str, default='mnist', choices=['mnist', 'femnist', 'cifar-c', 'tinyimg', 'cifar'])
     parser.add_argument('--data_dir', type=str, default='../data/')
     parser.add_argument('--auto', type=int, default=0, help='auto default option')
 
@@ -34,7 +35,7 @@ def make_arm_train_parser():
     parser.add_argument('--smaller_model', type=int, default=1, help='use smaller model ') 
     parser.add_argument('--noisy', type=int, default=0, help='add noisy if 1') 
     parser.add_argument('--num_noise', type=int, default=1, help='Number of noises')  
-    parser.add_argument('--noise_type', type=str, default='random', choices=['random', 'front', 'back'])  
+    # parser.add_argument('--noise_type', type=str, default='random', choices=['random', 'front', 'back'])  
     parser.add_argument('--beta', type=float, default=1.0, help='coef of exponential distribution') 
     parser.add_argument('--T', type=int, default=3, help='num of iter') 
     parser.add_argument('--mask', type=int, default=None, help='masking loss if 1') 
@@ -48,6 +49,15 @@ def make_arm_train_parser():
     parser.add_argument('--debug_unc', type=int, default=0)
     parser.add_argument('--zero_context', type=int, default=0)
     parser.add_argument('--noise_level', type=float, default=0.1)
+    parser.add_argument('--cxt_self_include', type=int, default=0)
+    parser.add_argument('--zero_init', type=int, default=1)
+    parser.add_argument('--noise_type', type=str, default='sp', choices=['group', 'sp', 'gaussian'])
+    parser.add_argument('--bald', type=int, default=0)
+
+    parser.add_argument('--save_img', type=int, default=0)
+
+    parser.add_argument('--normal_iter', type=int, default=10)
+    parser.add_argument('--noise_iter', type=int, default=3)
 
 
     return parser
@@ -141,7 +151,7 @@ def add_common_args(parser):
 
 def add_model_args(parser):
     # Model args
-    parser.add_argument('--model', type=str, default='convnet', choices=['resnet50', 'convnet', 'convnet_unc', 'resnet50_unc'])
+    parser.add_argument('--model', type=str, default='convnet', choices=['resnet50', 'convnet', 'convnet_unc', 'resnet50_unc', 'resnet18_unc', 'resnet18'])
     parser.add_argument('--pretrained', type=int, default=1, help='Pretrained resnet')
 
     # Method
@@ -189,13 +199,6 @@ def init_algorithm(args):
         n_channels = n_img_channels + args.n_context_channels
         hidden_dim = 64
         if args.context_net == 'ContextNetEx':
-            print("Context network is", args.norm_type)            
-            # context_net = ContextNetEx(input_shape, 
-            #                            args.n_context_channels,
-            #                            hidden_dim=hidden_dim, 
-            #                            kernel_size=5,
-            #                            norm_type=args.norm_type
-            #                            ).to(args.device)
             context_net = ResNetContext(input_shape=(args.n_context_channels, 64, 64),
                                         in_channels=n_img_channels, 
                                         out_channels=args.n_context_channels * 64 * input_shape[2],
@@ -234,6 +237,15 @@ def init_algorithm(args):
                                      pretrained=args.pretrained, return_features=return_features,
                                      dropout_rate=args.dropout_rate
                                      )
+    elif args.model == 'resnet18':        
+        model = ResNet18(n_channels)
+        num_feats = model.fc.in_features
+        model.fc = nn.Linear(num_feats, num_classes) # match class number
+
+    elif args.model == 'resnet18_unc':
+        model = ResNet18UNC(n_channels, args.dropout_rate)
+        num_feats = model.fc.in_features
+        model.fc = nn.Linear(num_feats, num_classes) # match class number
 
 
     model = model.to(args.device)
@@ -293,6 +305,7 @@ def init_algorithm(args):
         hparams['T'] = args.T
         hparams['beta'] = args.beta
         hparams['zero_context'] = args.zero_context
+        hparams['cxt_self_include'] = args.cxt_self_include
         
         print("Algorithm is ARM_CUSUM.")
         algorithm = ARM_CUSUM(model, loss_fn, args.device, context_net, hparams)
@@ -309,8 +322,12 @@ def init_algorithm(args):
         hparams['T'] = args.T
         hparams['debug'] = args.debug_unc
         hparams['zero_context'] = args.zero_context
+        hparams['cxt_self_include'] = args.cxt_self_include
+        hparams['zero_init'] = args.zero_init
+        hparams['bald'] = args.bald
+        
 
-        print("Algorithm is ARM_CML_UNC.")
+        print("Algorithm is ARM_UNC.")
         algorithm = ARM_UNC(model, loss_fn, args.device, context_net, hparams)
 
     elif args.algorithm == 'ARM-CONF':
@@ -325,6 +342,8 @@ def init_algorithm(args):
         hparams['T'] = args.T
         hparams['debug'] = args.debug_unc
         hparams['zero_context'] = args.zero_context
+        hparams['cxt_init_include'] = args.cxt_init_include
+        
 
         print("Algorithm is ARM_CONF.")
         algorithm = ARM_CONF(model, loss_fn, args.device, context_net, hparams)

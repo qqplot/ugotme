@@ -55,82 +55,83 @@ def test_zero(args, algorithm, seed, eval_on, loaders):
     return stats
 
 
-def test_online():
-    parser = utils.make_arm_train_parser()
-    args = parser.parse_args()
+# def test_online():
+#     parser = utils.make_arm_train_parser()
+#     args = parser.parse_args()
 
-    if args.auto:
-        utils.update_arm_parser(args)
+#     if args.auto:
+#         utils.update_arm_parser(args)
 
-    if not (args.test and args.ckpt_folders): # test a set of already trained models
-        print("Check args.test and args.ckpt_folders!!!")
-        return
+#     if not (args.test and args.ckpt_folders): # test a set of already trained models
+#         print("Check args.test and args.ckpt_folders!!!")
+#         return
 
-    args.cuda, args.device = utils.get_device_from_arg(args.device_id)
-    print('Using device:', args.device)
-    start_time = datetime.now()
+#     args.cuda, args.device = utils.get_device_from_arg(args.device_id)
+#     print('Using device:', args.device)
+#     start_time = datetime.now()
 
-    # Online test
-    args.meta_batch_size = 1
-    args.support_size = 100
-    args.seeds = [0, 1, 2]
+#     # Online test
+#     args.meta_batch_size = 1
+#     # args.support_size = 100
+#     # args.support_size = 50
+#     args.seeds = [0, 1, 2]
 
-    # Check if checkpoints exist
-    for ckpt_folder in args.ckpt_folders:
-        ckpt_path = Path('output') / 'checkpoints' / ckpt_folder / f'best.pkl'
-        algorithm = torch.load(ckpt_path)
-        print("Found: ", ckpt_path)
+#     # Check if checkpoints exist
+#     for ckpt_folder in args.ckpt_folders:
+#         ckpt_path = Path('output') / 'checkpoints' / ckpt_folder / f'best.pkl'
+#         algorithm = torch.load(ckpt_path)
+#         print("Found: ", ckpt_path)
 
-    score_keeper = ScoreKeeper(args.eval_on, len(args.ckpt_folders))
+#     score_keeper = ScoreKeeper(args.eval_on, len(args.ckpt_folders))
 
-    avg_online_acc = []
-    for i, ckpt_folder in enumerate(args.ckpt_folders):
+#     avg_online_acc = []
+#     for i, ckpt_folder in enumerate(args.ckpt_folders):
 
-        # test algorithm
-        seed = args.seeds[i]
-        args.ckpt_path = Path('output') / 'checkpoints' / ckpt_folder / f'best.pkl' # final_weights.pkl
-        algorithm = torch.load(args.ckpt_path).to(args.device)
-        algorithm.support_size = args.support_size
-        algorithm.normalize = args.normalize
-        algorithm.online = args.online
-        algorithm.T = args.T
-        algorithm.zero_context = 0
-        if args.norm_type == 'batch':
-            algorithm.context_norm = None
+#         # test algorithm
+#         seed = args.seeds[i]
+#         args.ckpt_path = Path('output') / 'checkpoints' / ckpt_folder / f'best.pkl' # final_weights.pkl
+#         algorithm = torch.load(args.ckpt_path).to(args.device)
+#         algorithm.support_size = args.support_size
+#         algorithm.normalize = args.normalize
+#         algorithm.online = args.online
+#         algorithm.T = args.T
+#         algorithm.zero_context = args.zero_context
+#         if args.norm_type == 'batch':
+#             algorithm.context_norm = None
         
 
-        stats, _ = test(args, algorithm, seed, eval_on=args.eval_on)
+#         stats, _ = test(args, algorithm, seed, eval_on=args.eval_on)
         
-        # print('online_acc:', stats['test']['test/online_acc'])
-        # print(stats['test']['test/online_acc'].shape)
-        online_sum = [0 for _ in range(args.support_size)]
-        online_len = [0 for _ in range(args.support_size)]
+#         # print('online_acc:', stats['test']['test/online_acc'])
+#         # print(stats['test']['test/online_acc'].shape)
+#         online_sum = [0 for _ in range(args.support_size)]
+#         online_len = [0 for _ in range(args.support_size)]
 
-        for _, acc in enumerate(stats['test']['test/online_acc']):
+#         for _, acc in enumerate(stats['test']['test/online_acc']):
 
-            for i, a in enumerate(acc):
-                online_sum[i] += a 
-                online_len[i] += 1
+#             for i, a in enumerate(acc):
+#                 online_sum[i] += a 
+#                 online_len[i] += 1
 
-        online_acc = [online_sum[i]/online_len[i] for i in range(args.support_size)]
+#         online_acc = [online_sum[i]/online_len[i] for i in range(args.support_size)]
 
-        avg_online_acc.append(online_acc)
+#         avg_online_acc.append(online_acc)
         
-        print("length:", len(stats['test']['test/online_acc']),"online_acc:", online_acc[:10])        
+#         print("length:", len(stats['test']['test/online_acc']),"online_acc:", online_acc[:10])        
         
-        score_keeper.log(stats)
+#         score_keeper.log(stats)
         
 
-    avg_online_acc = np.array(avg_online_acc).mean(axis=0)
+#     avg_online_acc = np.array(avg_online_acc).mean(axis=0)
 
-    print("\nsupport size is", args.support_size)        
-    print(avg_online_acc.tolist())
+#     print("\nsupport size is", args.support_size)        
+#     print(avg_online_acc.tolist())
 
-    score_keeper.print_stats()
+#     score_keeper.print_stats()
 
-    end_time = datetime.now()
-    runtime = (end_time - start_time).total_seconds() / 60.0
-    print("\nTotal runtime: ", runtime)
+#     end_time = datetime.now()
+#     runtime = (end_time - start_time).total_seconds() / 60.0
+#     print("\nTotal runtime: ", runtime)
     
 
 def test_online_noise():
@@ -150,7 +151,7 @@ def test_online_noise():
 
     # Online test
     args.meta_batch_size = 1
-    args.support_size = 100
+    # args.support_size = 100
     args.seeds = [0, 1, 2]
 
     # Check if checkpoints exist
@@ -160,10 +161,10 @@ def test_online_noise():
         print("Found: ", ckpt_path)
 
     score_keeper = ScoreKeeper(args.eval_on, len(args.ckpt_folders))
-    score_keeper_zero = ScoreKeeper(args.eval_on, len(args.ckpt_folders))
     
     avg_online_acc = []
-    avg_online_acc_zero = []
+    avg_weights = []
+    avg_stds = []
     for i, ckpt_folder in enumerate(args.ckpt_folders):
 
         # test algorithm
@@ -178,50 +179,68 @@ def test_online_noise():
         algorithm.online = args.online
         algorithm.T = args.T
         algorithm.adapt_bn = args.adapt_bn
+        algorithm.cxt_self_include = args.cxt_self_include
+        algorithm.zero_init = args.zero_init
+        algorithm.bald = args.bald
+        algorithm.zero_context = args.zero_context
+
         if args.norm_type == 'batch':
             algorithm.context_norm = None
-        algorithm.zero_context = 0
+        
         stats, loaders = test(args, algorithm, seed, eval_on=args.eval_on)
-
-        algorithm.zero_context = 1
-        stats_zero = test_zero(args, algorithm, seed, eval_on=args.eval_on, loaders=loaders)
-
         online_sum = [0 for _ in range(args.support_size)]
         online_len = [0 for _ in range(args.support_size)]
-        online_sum_zero = [0 for _ in range(args.support_size)]
-        for _, acc in enumerate(stats['test']['test/online_acc']):
+        weights = [0 for _ in range(args.support_size)]
+        stds = [0 for _ in range(args.support_size)]
 
+        for idx, acc in enumerate(stats['test']['test/online_acc']):
+            whts = stats['test']['test/weights'][idx]
+            standard_errors = stats['test']['test/standard_errors'][idx]
             for i, a in enumerate(acc):
                 online_sum[i] += a 
                 online_len[i] += 1
-
-        for _, acc in enumerate(stats_zero['test']['test/online_acc']):
-
-            for i, a in enumerate(acc):
-                online_sum_zero[i] += a 
+                if algorithm.model.__class__.__name__[-3:] == 'UNC':
+                    if type(whts) != list:
+                        weights[i] += whts
+                        stds[i] += standard_errors
+                    else:
+                        weights[i] += whts[i]
+                        stds[i] += standard_errors[i]
 
         online_acc = [online_sum[i]/online_len[i] for i in range(args.support_size)]
-        online_acc_zero = [online_sum_zero[i]/online_len[i] for i in range(args.support_size)]
+
+        if algorithm.model.__class__.__name__[-3:] == 'UNC':
+            weights = [weights[i]/online_len[i] for i in range(args.support_size)]
+            stds = [stds[i]/online_len[i] for i in range(args.support_size)]
 
         avg_online_acc.append(online_acc)
-        avg_online_acc_zero.append(online_acc_zero)
+        avg_weights.append(weights)
+        avg_stds.append(stds)
     
         print("length:", len(stats['test']['test/online_acc']),"online_acc:", online_acc[:10])        
-        print("length:", len(stats_zero['test']['test/online_acc']),"online_acc_zero:", online_acc_zero[:10])        
-        
+        if algorithm.model.__class__.__name__[-3:] == 'UNC':
+            print("length:", len(stats['test']['test/weights']), "weights:", weights[:10]) 
+            print("length:", len(stats['test']['test/standard_errors']), "standard_errors:", stds[:10])        
+
         score_keeper.log(stats)
-        score_keeper_zero.log(stats_zero)
+
 
     avg_online_acc = np.array(avg_online_acc).mean(axis=0)
-    avg_online_acc_zero = np.array(avg_online_acc_zero).mean(axis=0)
+
+
+    avg_weights = np.array(avg_weights).mean(axis=0)
+    avg_stds = np.array(avg_stds).mean(axis=0)
 
     print("\nsupport size is", args.support_size)        
     print(avg_online_acc.tolist())
-    print("zero online..")
-    print(avg_online_acc_zero.tolist())
+
+    print("online weights..")
+    print(avg_weights.tolist())
+
+    print("online standard errors..")
+    print(avg_stds.tolist())
 
     score_keeper.print_stats()
-    score_keeper_zero.print_stats()
 
     end_time = datetime.now()
     runtime = (end_time - start_time).total_seconds() / 60.0

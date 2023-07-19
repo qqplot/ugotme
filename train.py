@@ -49,7 +49,8 @@ def run_epoch(algorithm, loader, train, progress_bar=True, mask=None, mask_p=1.0
             if logits is None: # DANN
                 continue
         else:
-            if algorithm.model.__class__.__name__ == 'ConvNetUNC' or algorithm.model.__class__.__name__ == 'ResNet_UNC':
+            
+            if algorithm.model.__class__.__name__[-3:] == 'UNC':
                 logits, u_list, std_list = algorithm.predict(images)
             else:
                 logits = algorithm.predict(images)
@@ -57,6 +58,7 @@ def run_epoch(algorithm, loader, train, progress_bar=True, mask=None, mask_p=1.0
             epoch_results['epoch_u_list'].append(u_list)
             epoch_results['epoch_std_list'].append(std_list)
 
+            
         epoch_labels.append(labels.to('cpu').clone().detach())
         epoch_logits.append(logits.to('cpu').clone().detach())
         epoch_group_ids.append(group_ids.to('cpu').clone().detach())
@@ -89,7 +91,7 @@ def train(args):
     elif args.scheduler == 'cosine_warm':
         scheduler = CosineAnnealingWarmRestarts(optimizer=algorithm.optimizer, T_0=10, T_mult=1, eta_min=0.00001)
 
-    for epoch in trange(args.num_epochs):
+    for epoch in trange(1, args.num_epochs+1):
         _, _, _, epoch_results = run_epoch(algorithm, train_loader, train=True, progress_bar=args.progress_bar, mask=args.mask, mask_p=args.mask_p)
         
         if args.scheduler != 'none':
@@ -97,10 +99,10 @@ def train(args):
 
         print(f"Epoch {epoch} - lr: {algorithm.optimizer.param_groups[0]['lr'] : .6f}", end='  ')
         if args.algorithm in ['ARM-UNC', 'ARM-CONF']:
-            print(f"beta: {algorithm.beta.item():.4f}", end='  ')
-            print(algorithm.c0[0][0][0])
+            print(f"beta: {algorithm.beta.item():.4f}, tau: {algorithm.tau.item():4f}", end='  ')
+            print(f"context_init: {algorithm.context_init[0][0][0][0].item():.4f}, {algorithm.context_init[0][0][0][1].item():.4f}")
         print()
-        if epoch % args.epochs_per_eval == 0:
+        if epoch == 1 or epoch % args.epochs_per_eval == 0:
             stats = eval_groupwise(args, algorithm, val_loader, epoch, split='val', n_samples_per_group=args.n_samples_per_group)
 
             if args.worst_case:
@@ -138,6 +140,7 @@ def get_group_iterator(loader, group, support_size, n_samples_per_group=None):
     for i, idx in enumerate(example_ids):
         x, y, g = loader.dataset[idx]
         X.append(x); Y.append(y); G.append(g)
+
         if (i + 1) % support_size == 0:
             X, Y, G = torch.stack(X), torch.tensor(Y, dtype=torch.long), torch.tensor(G, dtype=torch.long)
             batches.append((X, Y, G))
@@ -168,24 +171,38 @@ def get_group_iterator_noisy(args, loader, group, support_size, n_samples_per_gr
         print(f"num_noise is {args.num_noise} and support_size is {support_size}!!!")
         num_noise = support_size
 
-    normal_iter = 10
-    noise_iter = 3
+    normal_iter = args.normal_iter
+    noise_iter = args.noise_iter
     normal_count, noise_count = 0, 0
     for i, (idx, idx_not_group) in enumerate(zip(example_ids, example_ids_not_group)):
         x, y, g = loader.dataset[idx]
-        x_noise, y_noise, g_noise = loader.dataset[idx_not_group]     
-
+        
         if normal_count < normal_iter:
             normal_count += 1            
             X.append(x); Y.append(y); G.append(g)
+        elif normal_iter == 0:
+            x_noise = x.clone()
+            x_noise = torch.tensor(make_noise(args, x_noise))
+            X.append(x_noise); Y.append(y); G.append(g)
         else:
             if noise_count < noise_iter:
                 noise_count += 1
-                x_noise = x.clone() 
-                x_noise = torch.tensor(random_noise(x_noise, mode='salt', amount=args.noise_level))
-                name = 'mnist' + str(g) + str(y) + '.png'
-                # save_noisy_image(x_noise, name)
-                X.append(x_noise); Y.append(y); G.append(g)
+                if args.noise_type != 'group':
+                    x_noise = x.clone()
+                    x_noise = torch.tensor(make_noise(args, x_noise))
+                    if args.save_img:                        
+                        # dir_img = f'assets/{args.dataset}/{str(g)}/'
+                        dir_img = f'assets/{args.dataset}/{str(y)}/'
+                        print("SAVE", dir_img)
+                        createFolder(dir_img)
+                        name = dir_img + f'{str(y.item())}_{str(g)}_{i}.png'
+                        name_ori = dir_img + f'ori_{str(y.item())}_{str(g)}_{i}.png'
+                        save_noisy_image(x, name_ori)
+                        save_noisy_image(x_noise, name)
+                    X.append(x_noise); Y.append(y); G.append(g)
+                else:
+                    x_noise, y_noise, g_noise = loader.dataset[idx_not_group]     
+                    X.append(x_noise); Y.append(y_noise); G.append(g_noise)
             else:
                 normal_count, noise_count = 1, 0
                 X.append(x); Y.append(y); G.append(g)
@@ -224,7 +241,7 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
     # Loop over each group
     for i, group in tqdm(enumerate(loader.dataset.groups), desc='Evaluating', total=len(loader.dataset.groups)):
         
-        if args.noisy:
+        if args.noisy:            
             num_noise = 1 if args.num_noise else args.num_noise
             group_iterator = get_group_iterator_noisy(args, loader, group, args.support_size, n_samples_per_group)
         else:
@@ -234,6 +251,9 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
         epoch_logits = epoch_results['epoch_logits']
         epoch_labels = epoch_results['epoch_labels']
         epoch_u_list, epoch_std_list = epoch_results['epoch_u_list'], epoch_results['epoch_std_list']
+        if args.train and algorithm.model.__class__.__name__[-3:] == 'UNC':
+            print('epoch_u_list:', epoch_u_list[0][:5])
+            print('epoch_std_list:', epoch_std_list[0][:5])
 
         preds = np.argmax(probs, axis=1)
 
@@ -269,7 +289,6 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
     average_case_acc = np.mean(accuracies)
 
     total_size = num_examples.sum()
-
     stats = {
                 f'{split}/worst_case_acc': worst_case_acc,
                 f'{split}/worst_case_group_size': worst_case_group_size,
@@ -291,9 +310,26 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
 
 
 def save_noisy_image(img, name):
-    if img.size(1) == 3:
-        img = img.view(img.size(0), 3, 32, 32)
-        save_image(img, name)
+    save_image(img, name)
+    # if img.size(0) == 3:
+    #     img = img.view(img.size(0), 3, 32, 32)
+    #     save_image(img, name)
+    # else:
+    #     img = img.view(img.size(0), 1, 28, 28)
+    #     save_image(img, name)
+
+
+def make_noise(args, img):
+
+    if args.noise_type == 'sp':
+        return random_noise(img, mode='s&p', amount=args.noise_level)
     else:
-        img = img.view(img.size(0), 1, 28, 28)
-        save_image(img, name)
+        return random_noise(img, mode='gaussian', var=args.noise_level).astype(np.float32)
+
+import os
+def createFolder(directory):
+    try:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+    except OSError:
+        print ('Error: Creating directory. ' +  directory)    

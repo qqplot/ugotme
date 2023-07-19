@@ -21,6 +21,15 @@ data/CIFAR-10-C-new/
 data/CIFAR-10-C/
 data/Tiny-ImageNet-C-new
 data/Tiny-ImageNet-C/
+data/cifar-10-batches-py/
 **/*.tar
+assets/
 
 run_debug.sh
+run_cifar-c.sh
+run_cifar.sh
+run_femnist.sh
+run_tiny.sh
+run.sh
+test_online.py
+
