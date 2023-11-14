@@ -280,6 +280,20 @@ class ARM_CML(ERM):
 
             return self.model(x)
 
+    def predict_with_context(self, x, context=None, train=False):
+        batch_size, c, h, w = x.shape
+
+        meta_batch_size, support_size = 1, batch_size * batch_size
+  
+        #context - Shape: batch_size * batch_size, channels, H, W    
+        # support_size * support_size, context_size
+        self.eval()
+        self.context_net.eval()
+        self.model.eval()
+        x = torch.cat([x, context], dim=1)
+        with torch.no_grad():
+            return self.model(x), None, None
+
 class ARM_CUSUM(ERM):
 
     def __init__(self, model, loss_fn, device, context_net, hparams={}):
@@ -349,9 +363,6 @@ class ARM_CUSUM(ERM):
         x = torch.cat([x, ctx], dim=1)
         return self.model(x)
 
-
-
-
 class ARM_UNC(ERM):
 
     def __init__(self, model, loss_fn, device, context_net, hparams={}):
@@ -368,6 +379,8 @@ class ARM_UNC(ERM):
         self.beta = torch.zeros(1, requires_grad=True, device=device)
         self.tau = torch.zeros(1, requires_grad=True, device=device)
         self.bald = hparams['bald']
+        self.adapt_bn = hparams['adapt_bn']
+        self.is_offline = hparams['is_offline']
         self.zero_init = hparams['zero_init']
         self.zero_context = hparams['zero_context']
 
@@ -398,6 +411,83 @@ class ARM_UNC(ERM):
         entropy_expected_p = - torch.sum(expected_p * torch.log(expected_p + self.eps), dim=-1)
         return (entropy_expected_p - expected_entropy)
 
+    # def predict(self, x, train=False):
+    #     # get current input size
+    #     batch_size, c, h, w = x.shape
+
+    #     # get number of groups and support size
+    #     if batch_size % self.support_size == 0:
+    #         meta_batch_size, support_size = batch_size // self.support_size, self.support_size
+    #     else:
+    #         meta_batch_size, support_size = 1, batch_size
+
+    #     # set training mode
+    #     if train:
+    #         # set all modules training mode
+    #         self.train()
+    #         enable_dropout(self.model)
+    #     else:
+    #         # set all module eval
+    #         self.eval()
+    #         # but turn on dropout
+    #         enable_dropout(self.model)
+
+    #     # compute sample-wise context (batch_size, channels, H, W)
+    #     ctx = self.context_net(x)
+
+    #     # reshape x and ctx
+    #     x = x.reshape(meta_batch_size, support_size, c, h, w)
+    #     ctx = ctx.reshape(meta_batch_size, support_size, self.n_context_channels, h, w)
+
+    #     # accumulate ctx by uncertainty weights
+    #     u_list, ent_list = [], []
+    #     if self.cxt_self_include:
+    #         ctx_list = [ctx.transpose(0, 1)[0]]
+    #     else:
+    #         ctx_list = [self.context_init.expand(meta_batch_size, -1, -1, -1)]
+        
+    #     # for each input data
+    #     for idx, (x_t, ctx_t) in enumerate(zip(x.transpose(0, 1), ctx.transpose(0, 1))):
+
+    #         x_ctx_t = torch.cat([x_t, self.context_norm(ctx_list[-1])], dim=1)
+
+    #         # compute uncertainty
+    #         with torch.no_grad():
+    #             out_prob = []
+    #             for _ in range(self.T):
+    #                 out_prob.append(self.model(x_ctx_t) * torch.exp(self.tau))
+
+    #         out_prob = F.softmax(torch.stack(out_prob, dim=0), dim=-1)            
+    #         out_prob = torch.mean(out_prob, dim=0)
+    #         entropy = torch.sum(-out_prob * torch.log2(out_prob + self.eps), dim=-1)
+
+    #         u = torch.exp(-torch.exp(self.beta) * entropy)
+
+    #         u_list.append(u); ent_list.append(entropy)
+    #         ctx_list.append(u.reshape(-1, 1, 1, 1) * ctx_t + ctx_list[-1])
+
+    #     # stack results
+    #     u_list = torch.stack(u_list, dim=0).squeeze().tolist()
+    #     ent_list = torch.stack(ent_list, dim=0).squeeze().tolist()
+
+    #     # reshape context list (meta_batch_size, support_size, self.n_context_channels, h, w)
+    #     self.last_ctx = ctx_list[-1] # support_size, self.n_context_channels, h, w
+    #     ctx_list = torch.stack(ctx_list[:-1], dim=0).transpose(0, 1)
+
+    #     # reshape input / context (meta_batch_size * support_size, self.n_context_channels, h, w)
+    #     ctx_list = ctx_list.reshape(-1, self.n_context_channels, h, w)
+    #     x = x.reshape(-1, c, h, w)
+
+    #     x_ctx = torch.cat([x, self.context_norm(ctx_list)], dim=1)
+    #     if train:
+    #         self.train()
+    #         return self.model(x_ctx)  * torch.exp(self.tau)
+    #     else:
+    #         out_prob = []
+    #         for _ in range(self.T):
+    #             out_prob.append(F.softmax(self.model(x_ctx) * torch.exp(self.tau), dim=-1))
+    #         return torch.stack(out_prob, dim=0).mean(dim=0), u_list, ent_list
+
     def predict(self, x, train=False):
         # get current input size
         batch_size, c, h, w = x.shape
@@ -419,87 +509,118 @@ class ARM_UNC(ERM):
             # but turn on dropout
             enable_dropout(self.model)
 
-        # compute sample-wise context (batch_size, channels, H, W)
-        ctx = self.context_net(x)        
+        if self.adapt_bn:
+            self.train()
 
-        # reshape x and ctx
-        x = x.reshape(meta_batch_size, support_size, c, h, w)
-        ctx = ctx.reshape(meta_batch_size, support_size, self.n_context_channels, h, w)
+            out = []
+            for i in range(meta_batch_size):
+                x_i = x[i*support_size:(i+1)*support_size]
+                context_i = self.context_net(x_i)
 
-        # accumulate ctx by uncertainty weights
-        u_list, ent_list = [], []
-        if self.cxt_self_include:
-            ctx_list = [ctx.transpose(0, 1)[0]]
-        else:
-            ctx_list = [self.context_init.expand(meta_batch_size, -1, -1, -1)]
+                # accumulate ctx by uncertainty weights
+                ctx_list = [self.context_init]
+
+                # for each input data
+                for idx, (x_t, ctx_t) in enumerate(zip(x_i, context_i)):
+                    x_ctx_t = torch.cat([x_t.unsqueeze(0), self.context_norm(ctx_list[-1])], dim=1)
+
+                    # compute uncertainty
+                    with torch.no_grad():
+                        out_prob = []
+                        for _ in range(self.T):
+                            out_prob.append(self.model(x_ctx_t) * torch.exp(self.tau))
+                    out_prob = F.softmax(torch.stack(out_prob, dim=0), dim=-1)            
+                    out_prob = torch.mean(out_prob, dim=0)
+                    entropy = torch.sum(-out_prob * torch.log2(out_prob + self.eps), dim=-1)
+                    u = torch.exp(-torch.exp(self.beta) * entropy)
+                    ctx_list.append(u.reshape(-1, 1, 1, 1) * ctx_t.unsqueeze(0) + ctx_list[-1])
+
+                # reshape context list (support_size, self.n_context_channels, h, w)
+                ctx_list = torch.stack(ctx_list[:-1], dim=0)
+                ctx_list = ctx_list.reshape(-1, self.n_context_channels, h, w)
+
+                x_ctx = torch.cat([x_i, self.context_norm(ctx_list)], dim=1)
+
+                if train:
+                    self.train()
+                    out.append( self.model(x_ctx) * torch.exp(self.tau) )                    
+                else:
+                    out_prob = []
+                    with torch.no_grad():
+                        for _ in range(self.T):
+                            out_prob.append(F.softmax(self.model(x_ctx) * torch.exp(self.tau), dim=-1))
+                    out.append( torch.stack(out_prob, dim=0).mean(dim=0) )
+            if train:
+                return torch.cat(out)      
+            else: 
+                return torch.cat(out), None, None
         
-        # for each input data
-        for idx, (x_t, ctx_t) in enumerate(zip(x.transpose(0, 1), ctx.transpose(0, 1))):
+        else:
+            # compute sample-wise context (batch_size, channels, H, W)
+            ctx = self.context_net(x)
 
-            # get current input and prev_ctx
-            if self.zero_context:      
-                u = torch.ones(1)
-                u_list.append(u.reshape(-1, 1, 1, 1))
-                ent_list.append(u.reshape(-1, 1, 1, 1))
-                ctx_list.append(ctx_list[0])
-                continue
+            # reshape x and ctx
+            x = x.reshape(meta_batch_size, support_size, c, h, w)
+            ctx = ctx.reshape(meta_batch_size, support_size, self.n_context_channels, h, w)
 
-            x_ctx_t = torch.cat([x_t, self.context_norm(ctx_list[-1])], dim=1)
+            # accumulate ctx by uncertainty weights
+            u_list, ent_list = [], []
+            # if self.cxt_self_include:
+            #     ctx_list = [ctx.transpose(0, 1)[0]]
+            # else:
+            ctx_list = [self.context_init.expand(meta_batch_size, -1, -1, -1)]
+            
+            # for each input data
+            for idx, (x_t, ctx_t) in enumerate(zip(x.transpose(0, 1), ctx.transpose(0, 1))):
 
-            # compute uncertainty
-            with torch.no_grad():     
-                out_prob = []
-                for _ in range(self.T):
-                    out_prob.append(self.model(x_ctx_t) * torch.exp(self.tau))
+                x_ctx_t = torch.cat([x_t, self.context_norm(ctx_list[-1])], dim=1)
 
-            out_prob = F.softmax(torch.stack(out_prob, dim=0), dim=-1)
-            if self.bald:
-                entropy = self.get_BALD_acquisition(out_prob)
-            else:                
+                # compute uncertainty
+                with torch.no_grad():
+                    out_prob = []
+                    for _ in range(self.T):
+                        out_prob.append(self.model(x_ctx_t) * torch.exp(self.tau))
+
+                out_prob = F.softmax(torch.stack(out_prob, dim=0), dim=-1)            
                 out_prob = torch.mean(out_prob, dim=0)
                 entropy = torch.sum(-out_prob * torch.log2(out_prob + self.eps), dim=-1)
 
-            u = torch.exp(-torch.exp(self.beta) * entropy)
-            # u = torch.exp(-F.softplus(self.beta) * entropy)
+                u = torch.exp(-torch.exp(self.beta) * entropy)
 
-            u_list.append(u)
-            ent_list.append(entropy)
-            ctx_list.append(u.reshape(-1, 1, 1, 1) * ctx_t + ctx_list[-1])
+                u_list.append(u); ent_list.append(entropy)
+                ctx_list.append(u.reshape(-1, 1, 1, 1) * ctx_t + ctx_list[-1])
 
-        # stack results
-        u_list = torch.stack(u_list, dim=0).squeeze().tolist()
-        ent_list = torch.stack(ent_list, dim=0).squeeze().tolist()
+            # stack results
+            u_list = torch.stack(u_list, dim=0).squeeze().tolist()
+            ent_list = torch.stack(ent_list, dim=0).squeeze().tolist()
 
-        # reshape context list (meta_batch_size, support_size, self.n_context_channels, h, w)
-        self.last_ctx = ctx_list[-1] # support_size, self.n_context_channels, h, w
-        ctx_list = torch.stack(ctx_list[:-1], dim=0).transpose(0, 1)
+            # reshape context list (meta_batch_size, support_size, self.n_context_channels, h, w)
+            self.last_ctx = ctx_list[-1] # support_size, self.n_context_channels, h, w            
+            if self.is_offline:
+                ctx_list = self.last_ctx.unsqueeze(0).repeat_interleave(repeats=support_size, dim=0).transpose(0, 1)
+            else:
+                ctx_list = torch.stack(ctx_list[:-1] if not self.cxt_self_include else ctx_list[1:], dim=0).transpose(0, 1) # [meta_batch_size, support_size, c, h, w]
 
-        # reshape input / context (meta_batch_size * support_size, self.n_context_channels, h, w)
-        ctx_list = ctx_list.reshape(-1, self.n_context_channels, h, w)
-        x = x.reshape(-1, c, h, w)
+            # reshape input / context (meta_batch_size * support_size, self.n_context_channels, h, w)
+            ctx_list = ctx_list.reshape(-1, self.n_context_channels, h, w)
+            x = x.reshape(-1, c, h, w)
 
-        # do prediction based on context
-        x_ctx = torch.cat([x, self.context_norm(ctx_list)], dim=1)
-        if train:
-            self.train()
-            return self.model(x_ctx)  * torch.exp(self.tau)
-        else:
-            out_prob = []
-            for _ in range(self.T):
-                out_prob.append(F.softmax(self.model(x_ctx) * torch.exp(self.tau), dim=-1))
-            return torch.stack(out_prob, dim=0).mean(dim=0), u_list, ent_list
+            x_ctx = torch.cat([x, self.context_norm(ctx_list)], dim=1)
+            if train:
+                self.train()
+                return self.model(x_ctx)  * torch.exp(self.tau)
+            else:
+                out_prob = []
+                for _ in range(self.T):
+                    out_prob.append(F.softmax(self.model(x_ctx) * torch.exp(self.tau), dim=-1))
+                return torch.stack(out_prob, dim=0).mean(dim=0), u_list, ent_list
 
     def learn(self, images, labels, group_ids=None, mask=None, mask_p=1.0):
         self.train()
         # Forward
         logits = self.predict(images, train=True)
-        # Apply the mask
-        if mask:
-            random_mask = torch.randn(len(labels)).float().ge(mask_p).float().to(self.device)
-            loss = self.loss_fn(logits, labels) * random_mask
-            loss = torch.sum(loss) / torch.sum(random_mask)
-        else:
-            loss = self.loss_fn(logits, labels)
+
+        loss = self.loss_fn(logits, labels)
 
         self.update(loss)
         stats = { 'objective': loss.detach().item(), }

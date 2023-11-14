@@ -1,7 +1,7 @@
 import argparse
-from algorithm.models import ContextNet, ConvNet, ResNet, ConvNetUNC, MLP, ContextNetEx, ResNetContext, ResNet_UNC
+from algorithm.models import ContextNet, ConvNet, ResNet, ConvNetUNC, MLP, ResNet_UNC
 from algorithm.ResNet import ResNet18, ResNet18UNC
-from algorithm.algorithm import ERM, DRNN, MMD, ARM_LL, DANN, ARM_BN, ARM_CML, ARM_CUSUM, ARM_UNC, ARM_CONF
+from algorithm.algorithm import ERM, DRNN, MMD, ARM_LL, DANN, ARM_BN, ARM_CML, ARM_CUSUM, ARM_UNC
 import torch
 from torch import nn
 from pathlib import Path
@@ -59,9 +59,10 @@ def make_arm_train_parser():
     parser.add_argument('--normal_iter', type=int, default=10)
     parser.add_argument('--noise_iter', type=int, default=3)
 
+    parser.add_argument('--ctx_test', type=int, default=0)
+
 
     return parser
-
 
 def update_arm_parser(args):
     
@@ -98,7 +99,6 @@ def update_arm_parser(args):
         args.learning_rate = 1e-2 
         # args.adapt_bn = 1        # Need to check  
         # args.model = 'resnet50'  # Need to check
-
 
 def add_common_args(parser):
 
@@ -138,6 +138,7 @@ def add_common_args(parser):
 
     # Test
     parser.add_argument('--eval_on', type=str, nargs="*", default=['val', 'test'])
+    parser.add_argument('--is_offline', type=int, default=0, help='offline test for ARM_UNC')
 
     # Logging
     parser.add_argument('--seeds', type=int, nargs="*", default=[0], help='Seeds')
@@ -146,9 +147,6 @@ def add_common_args(parser):
     parser.add_argument('--debug', type=int, default=0)
     parser.add_argument('--log_wandb', type=int, default=0)
 
-
-
-
 def add_model_args(parser):
     # Model args
     parser.add_argument('--model', type=str, default='convnet', choices=['resnet50', 'convnet', 'convnet_unc', 'resnet50_unc', 'resnet18_unc', 'resnet18'])
@@ -156,11 +154,11 @@ def add_model_args(parser):
 
     # Method
     parser.add_argument('--algorithm', type=str, default='ERM', 
-                        choices=['ERM', 'DRNN', 'ARM-BN', 'ARM-LL', 'DANN', 'MMD', 'ARM-CML', 'ARM-CUSUM', 'ARM-UNC', 'ARM-CONF'])
+                        choices=['ERM', 'DRNN', 'ARM-BN', 'ARM-LL', 'DANN', 'MMD', 'ARM-CML', 'ARM-CUSUM', 'ARM-UNC'])
 
     # ARM-CML
     parser.add_argument('--n_context_channels', type=int, default=12, help='Used when using a convnet/resnet')
-    parser.add_argument('--context_net', type=str, default='ContextNet', choices=['ContextNet', 'ContextNetEx']) # ContextNet
+    parser.add_argument('--context_norm', type=str, default='batch', choices=['batch', 'group'])
     parser.add_argument('--pret_add_channels', type=int, default=1)
     parser.add_argument('--adapt_bn', type=int, default=0)
     parser.add_argument('--dropout_rate', type=float, default=0.2)
@@ -168,7 +166,6 @@ def add_model_args(parser):
     # DANN
     parser.add_argument('--lambd', type=float, default=0.01)
     parser.add_argument('--d_steps_per_g_step', type=int, default=1)
-
 
 def init_algorithm(args):
 
@@ -195,20 +192,14 @@ def init_algorithm(args):
 
 
     # Channels of main model
-    if args.algorithm in ['ARM-CML', 'ARM-CUSUM', 'ARM-UNC', 'ARM-CONF']:
+    if args.algorithm in ['ARM-CML', 'ARM-CUSUM', 'ARM-UNC']:
         n_channels = n_img_channels + args.n_context_channels
         hidden_dim = 64
-        if args.context_net == 'ContextNetEx':
-            context_net = ResNetContext(input_shape=(args.n_context_channels, 64, 64),
-                                        in_channels=n_img_channels, 
-                                        out_channels=args.n_context_channels * 64 * input_shape[2],
-                                        model_name='resnet50',
-                                        pretrained=args.pretrained).to(args.device)
-        else:
-            context_net = ContextNet(in_channels=n_img_channels, 
-                                     out_channels=args.n_context_channels,
-                                     hidden_dim=hidden_dim, 
-                                     kernel_size=5).to(args.device)
+        context_net = ContextNet(in_channels=n_img_channels, 
+                                 out_channels=args.n_context_channels,
+                                 hidden_dim=hidden_dim, 
+                                 kernel_size=5, 
+                                 context_norm=args.context_norm).to(args.device)
     else:
         n_channels = n_img_channels
 
@@ -237,16 +228,6 @@ def init_algorithm(args):
                                      pretrained=args.pretrained, return_features=return_features,
                                      dropout_rate=args.dropout_rate
                                      )
-    elif args.model == 'resnet18':        
-        model = ResNet18(n_channels)
-        num_feats = model.fc.in_features
-        model.fc = nn.Linear(num_feats, num_classes) # match class number
-
-    elif args.model == 'resnet18_unc':
-        model = ResNet18UNC(n_channels, args.dropout_rate)
-        num_feats = model.fc.in_features
-        model.fc = nn.Linear(num_feats, num_classes) # match class number
-
 
     model = model.to(args.device)
 
@@ -255,10 +236,7 @@ def init_algorithm(args):
     if args.algorithm in ['DRNN']:
         loss_fn = nn.CrossEntropyLoss(reduction='none')
     else:
-        if args.mask:
-            loss_fn = nn.CrossEntropyLoss(reduction='none')
-        else:
-            loss_fn = nn.CrossEntropyLoss() # reduction='none'
+        loss_fn = nn.CrossEntropyLoss() # reduction='none'
 
     # Algorithm
     hparams = {'optimizer': args.optimizer,
@@ -325,28 +303,10 @@ def init_algorithm(args):
         hparams['cxt_self_include'] = args.cxt_self_include
         hparams['zero_init'] = args.zero_init
         hparams['bald'] = args.bald
+        hparams['is_offline'] = args.is_offline
         
-
         print("Algorithm is ARM_UNC.")
         algorithm = ARM_UNC(model, loss_fn, args.device, context_net, hparams)
-
-    elif args.algorithm == 'ARM-CONF':
-        hparams['support_size'] = args.support_size
-        hparams['n_context_channels'] = args.n_context_channels
-        hparams['adapt_bn'] = args.adapt_bn
-        hparams['normalize'] = args.normalize
-        hparams['norm_type'] = args.norm_type
-        hparams['input_shape'] = input_shape
-        hparams['affine_on'] = args.affine_on
-        hparams['beta'] = args.beta
-        hparams['T'] = args.T
-        hparams['debug'] = args.debug_unc
-        hparams['zero_context'] = args.zero_context
-        hparams['cxt_init_include'] = args.cxt_init_include
-        
-
-        print("Algorithm is ARM_CONF.")
-        algorithm = ARM_CONF(model, loss_fn, args.device, context_net, hparams)
 
     elif args.algorithm == 'ARM-LL':
         learned_loss_net = MLP(in_size=num_classes, norm_reduce=True).to(args.device)

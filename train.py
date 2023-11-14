@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, CosineAnnealingWarmRestarts
+import torch.nn.functional as F
 from tqdm import trange, tqdm
 import utils
 import wandb
@@ -34,7 +35,7 @@ def run_epoch(algorithm, loader, train, progress_bar=True, mask=None, mask_p=1.0
     if progress_bar:
         loader = tqdm(loader, desc=f'{"train" if train else "eval"} loop')
 
-    for images, labels, group_ids in loader:
+    for idx, (images, labels, group_ids) in enumerate(loader):
 
         # Put on GPU
         images = images.to(algorithm.device)
@@ -42,15 +43,11 @@ def run_epoch(algorithm, loader, train, progress_bar=True, mask=None, mask_p=1.0
 
         # Forward
         if train:
-            if mask:
-                logits, batch_stats = algorithm.learn(images, labels, group_ids, mask, mask_p)
-            else:
-                logits, batch_stats = algorithm.learn(images, labels, group_ids)
+            logits, batch_stats = algorithm.learn(images, labels, group_ids)
             if logits is None: # DANN
                 continue
         else:
-            
-            if algorithm.model.__class__.__name__[-3:] == 'UNC':
+            if algorithm.__class__.__name__[-3:] == 'UNC':           
                 logits, u_list, std_list = algorithm.predict(images)
             else:
                 logits = algorithm.predict(images)
@@ -67,6 +64,43 @@ def run_epoch(algorithm, loader, train, progress_bar=True, mask=None, mask_p=1.0
         epoch_results['epoch_group_ids'] = epoch_group_ids
 
     return torch.cat(epoch_logits), torch.cat(epoch_labels), torch.cat(epoch_group_ids), epoch_results
+
+def run_epoch_with_context(algorithm, loader, context):
+
+    epoch_labels, epoch_logits, epoch_group_ids = [], [], []
+    epoch_u, epoch_std = [], []
+    first_batch_size = None
+
+    for idx, (images, labels, group_ids) in enumerate(loader): # episode
+
+        # Put on GPU
+        images = images.to(algorithm.device)
+        labels = labels.to(algorithm.device)
+        
+        # (batch_size, channels, H, W)
+
+        # Forward
+        batch_size, c, h, w = images.shape
+        # first_batch_size = batch_size if first_batch_size is None else first_batch_size
+        # if batch_size != first_batch_size: continue
+        # print(f"first_context:{first_context.size()}, images:{images.size()}")
+
+        repeated_context = context.unsqueeze(0).repeat_interleave(repeats=batch_size, dim=0).to(algorithm.device) # (batch_size * batch_size, channels, H, W)
+        logits, u_list, std_list = algorithm.predict_with_context(images, context=repeated_context)
+
+        epoch_labels.append(labels.to('cpu').clone().detach())
+        epoch_logits.append(logits.to('cpu').clone().detach())
+        epoch_u.append(u_list)
+        epoch_std.append(std_list)
+
+    return {
+        'logits': torch.cat(epoch_logits, dim=0),
+        'labels': torch.cat(epoch_labels, dim=0),
+        'epoch_u': epoch_u,
+        'epoch_std': epoch_std
+    }
+ 
+
 
 def train(args):
 
@@ -154,7 +188,6 @@ def get_group_iterator(loader, group, support_size, n_samples_per_group=None):
 
     return batches
 
-
 def get_group_iterator_noisy(args, loader, group, support_size, n_samples_per_group=None):
     example_ids = np.nonzero(loader.dataset.group_ids == group)[0]
     
@@ -221,6 +254,145 @@ def get_group_iterator_noisy(args, loader, group, support_size, n_samples_per_gr
 
     return batches
 
+def make_context(args, algorithm, images):
+        first_batch_size, c, h, w = images.shape
+        algorithm.context_net.eval()
+        with torch.no_grad():
+            first_context = algorithm.context_net(images.to(algorithm.device)) # (batch_size, channels, H, W)
+
+        if algorithm.__class__.__name__[-3:] == 'UNC':
+            # compute sample-wise context (batch_size, channels, H, W)
+            ctx = first_context.to(algorithm.device)
+
+            # reshape x and ctx
+            x = images.reshape(1, first_batch_size, c, h, w).to(algorithm.device)
+            ctx = ctx.reshape(1, first_batch_size, algorithm.n_context_channels, h, w)
+
+            # accumulate ctx by uncertainty weights
+            u_list, ent_list = [], []
+            ctx_list = [ctx.transpose(0, 1)[0]]
+            
+            # for each input data
+            for idx, (x_t, ctx_t) in enumerate(zip(x.transpose(0, 1), ctx.transpose(0, 1))):
+                x_ctx_t = torch.cat([x_t, algorithm.context_norm(ctx_list[-1])], dim=1)
+
+                # compute uncertainty
+                with torch.no_grad():
+                    out_prob = []
+                    for _ in range(args.T):
+                        out_prob.append(algorithm.model(x_ctx_t) * torch.exp(algorithm.tau))
+
+                out_prob = F.softmax(torch.stack(out_prob, dim=0), dim=-1)
+                out_prob = torch.mean(out_prob, dim=0)
+                entropy = torch.sum(-out_prob * torch.log2(out_prob + algorithm.eps), dim=-1)
+
+                u = torch.exp(-torch.exp(algorithm.beta) * entropy)
+
+                u_list.append(u); ent_list.append(entropy)
+                ctx_list.append(u.reshape(-1, 1, 1, 1) * ctx_t + ctx_list[-1])
+
+            # stack results
+            u_list = torch.stack(u_list, dim=0).squeeze().tolist()
+            ent_list = torch.stack(ent_list, dim=0).squeeze().tolist()
+
+            # reshape context list (meta_batch_size, support_size, self.n_context_channels, h, w)
+            ctx_list = torch.stack(ctx_list[:-1], dim=0).transpose(0, 1)
+
+            # reshape input / context (meta_batch_size * support_size, self.n_context_channels, h, w)
+            ctx_list = ctx_list.reshape(-1, algorithm.n_context_channels, h, w)
+            x = x.reshape(-1, c, h, w)
+
+            return ctx_list
+        elif algorithm.__class__.__name__ == 'ARM_CML':
+            # print("first_context:", first_context.size())
+            first_context = first_context.cumsum(dim=0)
+            length_tensor = torch.arange(1, first_batch_size+1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(first_context.device)
+            first_context = torch.div(first_context, length_tensor.detach())
+            return first_context
+        else:
+            print("Nooo...")
+            return None
+
+
+
+def eval_groupwise_with_context(args, algorithm, loader, epoch=None, split='val', n_samples_per_group=None):
+    """ Test model on groups and log to wandb
+
+        Separate script for femnist for speed."""
+
+    groups = []
+    accuracies = np.zeros(len(loader.dataset.groups))
+    num_examples = np.zeros(len(loader.dataset.groups))
+
+    acc_by_group_unseen, acc_by_group_seen = [], []
+    acc_std = []
+    print("loader.dataset.groups", loader.dataset.groups)
+
+    # Loop over each group
+    for i, group in tqdm(enumerate(loader.dataset.groups), desc='Evaluating', total=len(loader.dataset.groups)):
+                
+        group_iterator = get_group_iterator(loader, group, args.support_size, n_samples_per_group)[:-1]        
+        group_iterator = random.sample(group_iterator, 2) # sample
+
+        unseen_episodes = [[] for _ in range(len(group_iterator))]
+        seen_episodes = [[] for _ in range(len(group_iterator))]
+
+        # Loop over each episode
+        for ep in range(len(group_iterator)):
+
+            # First context vector
+            images, labels, group_ids = group_iterator[ep] # ep: seen
+            first_context = make_context(args, algorithm, images)
+
+            # Loop over each context 1 ~ 50
+            acc_with_context, entropy_with_context = [], []
+            seen_acc_with_context, unseen_acc_with_context = [], []
+            for idx_context in range(args.support_size):
+                new_ctx = first_context[idx_context]
+                results_with_context = run_epoch_with_context(algorithm, group_iterator, new_ctx)
+                
+                probs = results_with_context['logits'] # torch.Size([65, 2500, 10])
+                labels = results_with_context['labels']
+                epoch_u = results_with_context['epoch_u']
+                epoch_std = results_with_context['epoch_std']
+
+                preds = np.argmax(probs, axis=1)  # torch.Size([550])
+                seen_preds = preds[ep*args.support_size:(ep+1)*args.support_size]; seen_labels = labels[ep*args.support_size:(ep+1)*args.support_size]
+                unseen_preds = np.delete(preds, np.s_[ep*args.support_size:(ep+1)*args.support_size]); unseen_labels = np.delete(labels, np.s_[ep*args.support_size:(ep+1)*args.support_size])
+                seen_accuracy = np.mean((seen_preds == seen_labels).numpy())
+                unseen_accuracy = np.mean((unseen_preds == unseen_labels).numpy())
+
+                # accuracy = np.mean((preds == labels).numpy()) # 1개 값. 컨텍스트벡터0에 대한 에피소드 하나의 정확도
+
+                if epoch_std[0] is not None:
+                    entropy = np.mean(np.array(epoch_std))
+                    entropy_with_context.append(entropy)
+                
+                # acc_with_context.append(accuracy)
+                seen_acc_with_context.append(seen_accuracy)
+                unseen_acc_with_context.append(unseen_accuracy)
+            seen_episodes[ep].extend(seen_acc_with_context)
+            unseen_episodes[ep].extend(unseen_acc_with_context)
+                        
+            print(f"[seen ep {ep}] {seen_episodes[ep]}")
+            print(f"[useen ep {ep}] {unseen_episodes[ep]}")
+
+        acc_by_group_unseen.append(unseen_episodes)
+        acc_by_group_seen.append(seen_episodes)
+        # ent_by_group.append(entropy_with_context)
+        # print(f"[group {group}] {acc_by_group[group]}")
+        # raise Exception
+
+    stats = {
+                f'{split}/average_acc': acc_by_group_unseen,
+                f'{split}/average_acc_seen': acc_by_group_seen,
+                # f'{split}/average_ent': ent_by_group,
+            }
+
+    return stats
+
+
+
 def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_per_group=None):
     """ Test model on groups and log to wandb
 
@@ -241,19 +413,20 @@ def eval_groupwise(args, algorithm, loader, epoch=None, split='val', n_samples_p
     # Loop over each group
     for i, group in tqdm(enumerate(loader.dataset.groups), desc='Evaluating', total=len(loader.dataset.groups)):
         
-        if args.noisy:            
+        if args.noisy:
             num_noise = 1 if args.num_noise else args.num_noise
             group_iterator = get_group_iterator_noisy(args, loader, group, args.support_size, n_samples_per_group)
         else:
             group_iterator = get_group_iterator(loader, group, args.support_size, n_samples_per_group)
 
         probs, labels, group_ids, epoch_results = run_epoch(algorithm, group_iterator, train=False, progress_bar=False)
+
         epoch_logits = epoch_results['epoch_logits']
         epoch_labels = epoch_results['epoch_labels']
         epoch_u_list, epoch_std_list = epoch_results['epoch_u_list'], epoch_results['epoch_std_list']
-        if args.train and algorithm.model.__class__.__name__[-3:] == 'UNC':
-            print('epoch_u_list:', epoch_u_list[0][:5])
-            print('epoch_std_list:', epoch_std_list[0][:5])
+        # if args.train and algorithm.model.__class__.__name__[-3:] == 'UNC':
+            # print('epoch_u_list:', epoch_u_list[0][:5])
+            # print('epoch_std_list:', epoch_std_list[0][:5])
 
         preds = np.argmax(probs, axis=1)
 

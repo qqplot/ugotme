@@ -24,6 +24,7 @@ def set_seed(seed, cuda):
     if cuda:
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+        torch.cuda.empty_cache()
     np.random.seed(seed)
     random.seed(seed)
     tf.random.set_seed(seed)
@@ -127,6 +128,8 @@ def main():
             algorithm = torch.load(args.ckpt_path).to(args.device)
             algorithm.adapt_bn = args.adapt_bn
             algorithm.zero_context = args.zero_context
+            algorithm.is_offline = args.is_offline
+            algorithm.cxt_self_include = args.cxt_self_include
             stats = test(args, algorithm, seed, eval_on=args.eval_on)
             score_keeper.log(stats)
 

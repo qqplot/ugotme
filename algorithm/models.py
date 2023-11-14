@@ -85,7 +85,7 @@ class ContextNetEx(nn.Module):
 
 class ContextNet(nn.Module):
 
-    def __init__(self, in_channels, out_channels, hidden_dim, kernel_size):
+    def __init__(self, in_channels, out_channels, hidden_dim, kernel_size, context_norm='batch'):
         super(ContextNet, self).__init__()
 
         # Keep same dimensions
@@ -93,20 +93,20 @@ class ContextNet(nn.Module):
 
         self.context_net = nn.Sequential(
                                 nn.Conv2d(in_channels, hidden_dim, kernel_size, padding=padding),
-                                nn.BatchNorm2d(hidden_dim),
+                                nn.BatchNorm2d(hidden_dim) if context_norm == 'batch' else nn.GroupNorm(16, hidden_dim),
                                 nn.ReLU(),
                                 nn.Conv2d(hidden_dim, hidden_dim, kernel_size, padding=padding),
-                                nn.BatchNorm2d(hidden_dim),
+                                nn.BatchNorm2d(hidden_dim) if context_norm == 'batch' else nn.GroupNorm(16, hidden_dim),
                                 nn.ReLU(),
                                 nn.Conv2d(hidden_dim, out_channels, kernel_size, padding=padding),
                                 # nn.BatchNorm2d(out_channels), # added
                                 # nn.ReLU(), # added
                             )
 
-
     def forward(self, x):
         out = self.context_net(x)
         return out
+
 
 
 class ConvNetUNC(nn.Module):
@@ -184,42 +184,6 @@ class ConvNetUNC(nn.Module):
         return out
 
 
-class ResNetContext(nn.Module):
-
-    def __init__(self, input_shape, in_channels, out_channels, model_name, pretrained=None,
-                 avgpool=False):
-        super(ResNetContext, self).__init__()
-
-        if pretrained:
-            weights = 'ResNet50_Weights.DEFAULT'
-
-        self.input_shape = input_shape
-        self.model = torchvision.models.__dict__[model_name](weights=weights)
-        self.num_features = self.model.fc.in_features
-
-        self.model.fc = nn.Linear(self.num_features, out_channels)
-
-        # Change number of input channels from 3 to whatever is needed
-        # to take in the context also.
-        model_inplanes = 64
-        old_weights = self.model.conv1.weight.data
-        self.model.conv1 = nn.Conv2d(in_channels, model_inplanes,
-                            kernel_size=7, stride=2, padding=3, bias=False)
-
-        if pretrained:
-            for i in range(in_channels):
-                self.model.conv1.weight.data[:, i, :, :] = old_weights[:, i % 3, :, :]
-
-        if avgpool:
-            self.model.avgpool = nn.AdaptiveAvgPool2d(1)
-
-    def forward(self, x):
-        out = self.model(x)
-        c, h, w = self.input_shape
-        out = out.view(-1, c, h, w)
-        return out
-
-
 
 
 
@@ -284,6 +248,8 @@ class ConvNet(nn.Module):
             out = self.conv0(x)
             out = self.conv1(out)
         out = self.conv2(out)
+
+
         out = self.adaptive_pool(out) # shape: batch_size, hidden_dim, 1, 1
         out = out.squeeze(dim=-1).squeeze(dim=-1) # make sure not to squeeze the first dimension when batch size is 0.
         out = self.final(out)
