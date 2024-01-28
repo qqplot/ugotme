@@ -110,7 +110,7 @@ class ContextNet(nn.Module):
 
 
 class ConvNetUNC(nn.Module):
-    def __init__(self, num_classes=10, num_channels=3, smaller_model=True, hidden_dim=128, return_features=False, dropout_rate=0.3, **kwargs):
+    def __init__(self, num_classes=10, num_channels=3, smaller_model=True, hidden_dim=128, return_features=False, dropout_rate=0.3, context_norm='batch', **kwargs):
         super(ConvNetUNC, self).__init__()
 
         kernel_size = 5
@@ -125,7 +125,8 @@ class ConvNetUNC(nn.Module):
 
             self.conv1 = nn.Sequential(
                             nn.Conv2d(num_channels, hidden_dim, kernel_size),
-                            nn.BatchNorm2d(hidden_dim),
+                            # nn.BatchNorm2d(hidden_dim),
+                            nn.BatchNorm2d(hidden_dim) if context_norm == 'batch' else nn.GroupNorm(16, hidden_dim),
                             nn.ReLU(),
                             nn.Dropout(p=self.dropout_rate),
                             nn.MaxPool2d(2)
@@ -134,14 +135,16 @@ class ConvNetUNC(nn.Module):
             print("using larger model")
             self.conv0 = nn.Sequential(
                         nn.Conv2d(num_channels, hidden_dim, kernel_size, padding=padding),
-                        nn.BatchNorm2d(hidden_dim),
+                        # nn.BatchNorm2d(hidden_dim),
+                        nn.BatchNorm2d(hidden_dim) if context_norm == 'batch' else nn.GroupNorm(16, hidden_dim),
                         nn.ReLU(),
                         nn.Dropout(p=self.dropout_rate),                        
                     )
             
             self.conv1 = nn.Sequential(
                             nn.Conv2d(hidden_dim, hidden_dim, kernel_size),
-                            nn.BatchNorm2d(hidden_dim),
+                            # nn.BatchNorm2d(hidden_dim),
+                            nn.BatchNorm2d(hidden_dim) if context_norm == 'batch' else nn.GroupNorm(16, hidden_dim),
                             nn.ReLU(),
                             nn.Dropout(p=self.dropout_rate),
                             nn.MaxPool2d(2)
@@ -149,7 +152,8 @@ class ConvNetUNC(nn.Module):
             
         self.conv2 = nn.Sequential(
                         nn.Conv2d(hidden_dim, hidden_dim, kernel_size),
-                        nn.BatchNorm2d(hidden_dim),
+                        # nn.BatchNorm2d(hidden_dim),
+                        nn.BatchNorm2d(hidden_dim) if context_norm == 'batch' else nn.GroupNorm(16, hidden_dim),
                         nn.ReLU(),
                         nn.Dropout(p=self.dropout_rate),
                         nn.MaxPool2d(2)
@@ -189,7 +193,7 @@ class ConvNetUNC(nn.Module):
 
 
 class ConvNet(nn.Module):
-    def __init__(self, num_classes=10, num_channels=3, smaller_model=True, hidden_dim=128, return_features=False, **kwargs):
+    def __init__(self, num_classes=10, num_channels=3, smaller_model=True, hidden_dim=128, return_features=False, context_norm='batch', **kwargs):
         super(ConvNet, self).__init__()
 
         kernel_size = 5
@@ -200,7 +204,8 @@ class ConvNet(nn.Module):
             print("using smaller model")
             self.conv1 = nn.Sequential(
                             nn.Conv2d(num_channels, hidden_dim, kernel_size),
-                            nn.BatchNorm2d(hidden_dim),
+                            # nn.BatchNorm2d(hidden_dim),
+                            nn.BatchNorm2d(hidden_dim) if context_norm == 'batch' else nn.GroupNorm(16, hidden_dim),
                             nn.ReLU(),
                             nn.MaxPool2d(2)
                         )
@@ -208,13 +213,15 @@ class ConvNet(nn.Module):
             print("using larger model")
             self.conv0 = nn.Sequential(
                         nn.Conv2d(num_channels, hidden_dim, kernel_size, padding=padding),
-                        nn.BatchNorm2d(hidden_dim),
+                        # nn.BatchNorm2d(hidden_dim),
+                        nn.BatchNorm2d(hidden_dim) if context_norm == 'batch' else nn.GroupNorm(16, hidden_dim),
                         nn.ReLU(),
                     )
 
             self.conv1 = nn.Sequential(
                             nn.Conv2d(hidden_dim, hidden_dim, kernel_size),
-                            nn.BatchNorm2d(hidden_dim),
+                            # nn.BatchNorm2d(hidden_dim),
+                            nn.BatchNorm2d(hidden_dim) if context_norm == 'batch' else nn.GroupNorm(16, hidden_dim),
                             nn.ReLU(),
                             nn.MaxPool2d(2)
                         )
@@ -222,7 +229,8 @@ class ConvNet(nn.Module):
 
         self.conv2 = nn.Sequential(
                         nn.Conv2d(hidden_dim, hidden_dim, kernel_size),
-                        nn.BatchNorm2d(hidden_dim),
+                        # nn.BatchNorm2d(hidden_dim),
+                        nn.BatchNorm2d(hidden_dim) if context_norm == 'batch' else nn.GroupNorm(16, hidden_dim),
                         nn.ReLU(),
                         nn.MaxPool2d(2)
                         )

@@ -283,13 +283,24 @@ class ARM_CML(ERM):
     def predict_with_context(self, x, context=None, train=False):
         batch_size, c, h, w = x.shape
 
-        meta_batch_size, support_size = 1, batch_size * batch_size
+        meta_batch_size, support_size = 1, batch_size
   
         #context - Shape: batch_size * batch_size, channels, H, W    
         # support_size * support_size, context_size
-        self.eval()
-        self.context_net.eval()
-        self.model.eval()
+        if self.adapt_bn:
+            self.train()
+            out = []
+            for i in range(support_size):
+                x_i = x[i].unsqueeze(0)
+                context_i = context[i].unsqueeze(0)
+                x_i = torch.cat([x_i, context_i], dim=1)
+                with torch.no_grad():
+                    out.append(self.model(x_i))
+            return torch.cat(out), None, None
+        else:
+            self.eval()
+            self.context_net.eval()
+            self.model.eval()
         x = torch.cat([x, context], dim=1)
         with torch.no_grad():
             return self.model(x), None, None
@@ -323,6 +334,7 @@ class ARM_CUSUM(ERM):
         self.norm_type = hparams['norm_type']
         self.input_shape = hparams['input_shape']
         self.zero_context = hparams['zero_context']
+        self.is_offline = hparams['is_offline']
 
         params = list(self.model.parameters()) + list(self.context_net.parameters())
         if self.affine_on:
@@ -358,6 +370,14 @@ class ARM_CUSUM(ERM):
 
         # reshape ctx (meta_batch_size * support_size, channels, h, w)
         ctx = ctx.reshape((meta_batch_size * support_size, self.n_context_channels, h, w))  
+
+        if self.is_offline:
+            ctx_list = []
+            for i in range(meta_batch_size):
+                ctx_i = ctx[i*support_size:(i+1)*support_size]
+                ctx_i = ctx_i[-1].expand(support_size, -1, -1, -1)
+                ctx_list.append(ctx_i)
+            ctx = torch.cat(ctx_list)
 
         # do prediction based on context
         x = torch.cat([x, ctx], dim=1)
@@ -536,7 +556,12 @@ class ARM_UNC(ERM):
                     ctx_list.append(u.reshape(-1, 1, 1, 1) * ctx_t.unsqueeze(0) + ctx_list[-1])
 
                 # reshape context list (support_size, self.n_context_channels, h, w)
-                ctx_list = torch.stack(ctx_list[:-1], dim=0)
+                if self.is_offline:
+                    ctx_list = ctx_list[-1].unsqueeze(0).repeat_interleave(repeats=support_size, dim=0)
+                else:
+                    ctx_list = torch.stack(ctx_list[:-1] if not self.cxt_self_include else ctx_list[1:], dim=0)
+
+                # ctx_list = torch.stack(ctx_list[:-1], dim=0)
                 ctx_list = ctx_list.reshape(-1, self.n_context_channels, h, w)
 
                 x_ctx = torch.cat([x_i, self.context_norm(ctx_list)], dim=1)
@@ -626,6 +651,32 @@ class ARM_UNC(ERM):
         stats = { 'objective': loss.detach().item(), }
         return logits, stats
 
+    def predict_with_context(self, x, context=None, train=False):
+        batch_size, c, h, w = x.shape
+
+        meta_batch_size, support_size = 1, batch_size * batch_size
+  
+        #context - Shape: batch_size * batch_size, channels, H, W    
+        # support_size * support_size, context_size
+        self.eval(); enable_dropout(self.model)
+
+        if self.adapt_bn:
+            self.train()
+
+        x_ctx = torch.cat([x, self.context_norm(context)], dim=1)
+
+        with torch.no_grad():
+            out_prob = []
+            for _ in range(self.T):            
+                # out_prob.append(F.softmax(self.model(x_ctx) * torch.exp(self.tau), dim=-1))
+                out_prob.append(self.model(x_ctx) * torch.exp(self.tau))
+
+            out_prob = F.softmax(torch.stack(out_prob, dim=0), dim=-1)
+            out_prob = torch.mean(out_prob, dim=0)
+            entropy = torch.sum(-out_prob * torch.log2(out_prob + self.eps), dim=-1)
+            u = torch.exp(-torch.exp(self.beta) * entropy)
+        # return torch.stack(out_prob, dim=0).mean(dim=0), None, None
+        return out_prob, u, entropy
 
 
 class ARM_LL(ERM):
@@ -868,3 +919,74 @@ class DANN(ERM):
             return logits, stats
 
 
+class TENT(ERM):
+    """
+    https://github.com/DequanWang/tent/blob/master/tent.py
+    """
+    def __init__(self, model, loss_fn, device, hparams={}):
+        super().__init__(model, loss_fn, device, hparams)
+
+        self.support_size = hparams['support_size']
+        self.online = hparams['online']
+        self.steps = hparams['steps']
+
+        params = self.model.parameters()
+        self.init_optimizers(params)
+
+    def softmax_entropy(self, x: torch.Tensor) -> torch.Tensor:
+        """Entropy of softmax distribution from logits."""
+        return -torch.sum((F.softmax(x, dim=-1) * F.log_softmax(x, dim=-1)), dim=-1)
+
+    def enable_bn_params(self, model):
+        """Enable the affine scale + shift parameters from batch norms.
+
+        Walk the model's modules and collect all batch normalization parameters.
+        Note: other choices of parameterization are possible!
+        """
+        model.eval()
+        for nm, m in model.named_modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.train()
+        return
+
+    def predict(self, x, train=False):
+        
+        if not train:
+            self.enable_bn_params(self.model)
+            for _ in range(self.steps):
+                outputs = self.predict_and_adapt(x)
+        else:
+            outputs = self.model(x)
+        return outputs
+
+    def predict_and_adapt(self, x):
+        """Forward and adapt model on batch of data.
+
+        Measure entropy of the model prediction, take gradients, and update params.
+        """        
+        batch_size, c, h, w = x.shape
+
+        # forward
+        outputs = self.model(x)
+
+        # adapt
+        loss = self.softmax_entropy(outputs).mean(0)
+
+        loss.backward()
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+        
+        return outputs
+
+    def learn(self, images, labels, group_ids):
+        
+        self.train()
+
+        # Forward
+        logits = self.predict(images, train=True) # batch, num_class
+
+        loss = self.loss_fn(logits, labels)
+
+        self.update(loss)
+        stats = { 'objective': loss.detach().item(), }
+        return logits, stats        
